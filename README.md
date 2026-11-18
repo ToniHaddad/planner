@@ -13,10 +13,11 @@
 </p>
 
 <p align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="docs/img/board-dark.png">
-    <img src="docs/img/board-light.png" alt="The planner board: brain dump on the left, today's three main tasks in the middle, and the day's timeline on the right with calendar events shown as locked, striped blocks" width="100%">
-  </picture>
+  <img src="docs/img/board-dark.png" alt="The planner board in its dark look: brain dump on the left, today's three main tasks in the middle with one task's subtasks and notes open, and the day's timeline on the right with calendar events shown as locked, striped blocks" width="100%">
+</p>
+<p align="center"><sub>Dark is the standard look. The sun button in the top bar switches to light:</sub></p>
+<p align="center">
+  <img src="docs/img/board-light.png" alt="The same board in its light look" width="100%">
 </p>
 
 ## How it works

@@ -14,16 +14,16 @@
 <link rel="icon" href="icon.svg" type="image/svg+xml">
 <style>
 :root{
-  --bg:#f6f3ee;--card:#fffdf9;--ink:#2b2a27;--soft:#6f6a60;--line:#e7e1d6;
-  --accent:#2f5d50;--accent-soft:#e3eee9;--go:#2f5d50;--code:#efebe3;
-  --work:#e9967a;--personal:#7fb7be;--learning:#9d8fd6;
-  --shadow:0 24px 70px rgba(60,50,30,.16);
+  --bg:#f3f0ff;--card:#fff;--ink:#1c1740;--soft:#655f92;--line:#e2dcfa;
+  --accent:#0a8f84;--accent-soft:#d9f6f1;--go:#6a48f2;--code:#eeeafc;
+  --work:#ff5fa8;--personal:#ffc83d;--learning:#4fe3d3;
+  --shadow:0 24px 70px rgba(60,40,140,.18);
 }
 @media (prefers-color-scheme:dark){
   :root{
-    --bg:#1b1a18;--card:#242321;--ink:#ece8e0;--soft:#a39d92;--line:#383631;
-    --accent:#8fd0b9;--accent-soft:#25372f;--go:#3a7a67;--code:#2c2b28;
-    --shadow:0 24px 70px rgba(0,0,0,.5);
+    --bg:#100e24;--card:#19163a;--ink:#f4f2ff;--soft:#aba6da;--line:#322d66;
+    --accent:#4fe3d3;--accent-soft:#143f4b;--go:#7453ff;--code:#231f4c;
+    --shadow:0 24px 70px rgba(5,3,20,.6);
   }
 }
 *{box-sizing:border-box}
@@ -56,7 +56,12 @@ h2{font-size:clamp(26px,3.4vw,36px);letter-spacing:-.02em;line-height:1.15;margi
 .card{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:24px}
 .card h3{margin:0 0 6px;font-size:19px}
 .card p{margin:0;color:var(--soft);font-size:16px}
-.num{width:36px;height:36px;border-radius:50%;display:grid;place-items:center;font-weight:750;color:#2b2a27;margin-bottom:14px}
+.num{width:36px;height:36px;border-radius:11px;display:grid;place-items:center;font-weight:750;color:#16132f;margin-bottom:14px}
+.grid2{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:18px}
+.grid2 figure{margin:0}
+.grid2 .shot{margin:0;border-radius:12px}
+.grid2 figcaption{color:var(--soft);font-size:15px;margin-top:10px}
+@media(max-width:760px){.grid2{grid-template-columns:1fr}}
 .n1{background:var(--work)}.n2{background:var(--personal)}.n3{background:var(--learning)}
 .feat{display:grid;grid-template-columns:repeat(2,1fr);gap:14px 40px;margin:0;padding:0;list-style:none}
 .feat li{padding-left:30px;position:relative}
@@ -107,7 +112,7 @@ footer span{margin-right:auto}
     <div class="shot">
       <picture>
         <source media="(prefers-color-scheme: dark)" srcset="img/board-dark.png">
-        <img src="img/board-light.png" width="2640" height="1720" alt="The planner board: a brain dump list on the left, three main tasks in the middle, and the day's timeline on the right with calendar events shown as locked, striped blocks">
+        <img src="img/board-light.png" width="2640" height="1800" alt="The planner board: a brain dump list on the left, three main tasks in the middle, and the day's timeline on the right with calendar events shown as locked, striped blocks">
       </picture>
     </div>
   </header>
@@ -119,6 +124,15 @@ footer span{margin-right:auto}
       <div class="card"><div class="num n1">1</div><h3>Brain dump</h3><p>Type everything on your mind and press Enter. Don't sort, don't schedule. Just get it out of your head.</p></div>
       <div class="card"><div class="num n2">2</div><h3>Today's 3</h3><p>Drag in the three tasks that would make the day a good one. Smaller things go to "Also today".</p></div>
       <div class="card"><div class="num n3">3</div><h3>Timebox</h3><p>Drag tasks onto the timeline. Meetings from your calendar are locked blocks, so the plan fits the time you have.</p></div>
+    </div>
+  </section>
+
+  <section id="looks" class="center">
+    <h2>Dark or light</h2>
+    <p class="lead">Dark is the standard look. One button in the top bar switches to light, and the planner remembers it.</p>
+    <div class="grid2">
+      <figure><div class="shot"><img src="img/board-dark.png" width="2640" height="1800" loading="lazy" alt="The planner board in its dark look"></div><figcaption>Dark</figcaption></figure>
+      <figure><div class="shot"><img src="img/board-light.png" width="2640" height="1800" loading="lazy" alt="The planner board in its light look"></div><figcaption>Light</figcaption></figure>
     </div>
   </section>
 
