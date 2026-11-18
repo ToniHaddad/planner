@@ -23,15 +23,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && !logged_in()) {
             : 'Wrong username or password.';
     }
 }
-$v = (string) @filemtime(__DIR__ . '/assets/app.js');
+$v = (string) max((int) @filemtime(__DIR__ . '/assets/app.js'), (int) @filemtime(__DIR__ . '/assets/app.css'));
+$theme = ($_COOKIE['planner_theme'] ?? '') === 'light' ? 'light' : 'dark';   // dark unless the sun button was used
 ?>
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-theme="<?= $theme ?>">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="robots" content="noindex, nofollow">
-<meta name="color-scheme" content="light dark">
+<meta name="color-scheme" content="<?= $theme ?>">
 <title>Planner</title>
 <link rel="icon" href="assets/icon.svg" type="image/svg+xml">
 <link rel="stylesheet" href="assets/app.css?v=<?= h($v) ?>">
@@ -65,31 +66,32 @@ $v = (string) @filemtime(__DIR__ . '/assets/app.js');
       <span class="sp"></span>
       <span class="calstat" id="calstat"></span>
       <button class="btn go" id="push" data-act="push" title="Put today's time blocks in your Google calendar named Planner" hidden>Send to calendar</button>
+      <button class="btn icon" id="theme" data-act="theme" title="Switch between dark and light" aria-label="Switch between dark and light"><?= $theme === 'light' ? '☾' : '☀' ?></button>
       <button class="btn icon" data-act="settings-open" title="Settings" aria-label="Settings">⚙</button>
     </div>
     <div class="cols">
-      <div class="col">
-        <p class="h">1 · Brain dump</p>
-        <p class="hint">Empty your head. Sort later.</p>
+      <div class="col c1">
+        <h2 class="h"><span class="num">1</span>Brain dump</h2>
+        <p class="hint">Empty your head. Sort later. The ⋯ on a task opens its subtasks and notes.</p>
         <p class="hint touch-only">To move a task, press and hold it, then drag.</p>
-        <div class="add"><input id="new" placeholder="Type and press Enter…" aria-label="New task" autocomplete="off" maxlength="300" autofocus><select id="newp" title="Project"></select></div>
+        <div class="add"><input id="new" name="task" type="text" placeholder="Type and press Enter…" aria-label="New task" autocomplete="off" data-lpignore="true" data-1p-ignore data-bwignore maxlength="300" autofocus><select id="newp" title="Project"></select></div>
         <div class="zone" id="z-dump" data-zone="dump" data-empty="Head empty. Nice."></div>
-        <p class="h gap">Projects</p>
+        <h2 class="h gap">Projects</h2>
         <p class="hint">Click a color to change it everywhere.</p>
         <div id="projects"></div>
         <button class="link" data-act="add-project">+ Add project</button>
       </div>
-      <div class="col">
-        <p class="h">2 · Today's 3</p>
+      <div class="col c2">
+        <h2 class="h"><span class="num">2</span>Today's 3</h2>
         <p class="hint">If only these get done, the day was good.</p>
         <div id="top3"></div>
-        <p class="h gap">Also today</p>
+        <h2 class="h gap">Also today</h2>
         <p class="hint">Smaller things, if there's room.</p>
         <div class="zone" id="z-also" data-zone="also" data-empty="Drop smaller tasks here"></div>
       </div>
-      <div class="col">
-        <p class="h">3 · Timebox</p>
-        <p class="hint" id="tlhint">Striped blocks come from your calendar and can't be planned over.</p>
+      <div class="col c3">
+        <h2 class="h"><span class="num">3</span>Timebox</h2>
+        <p class="hint" id="tlhint">Striped blocks come from your calendar and can't be planned over. Your own tasks can share a time: they sit side by side.</p>
         <div class="allday" id="allday"></div>
         <div class="tl" id="tl"></div>
       </div>
@@ -159,7 +161,7 @@ $v = (string) @filemtime(__DIR__ . '/assets/app.js');
         To show or hide a calendar, tick or untick it in Google Calendar’s list.</p>
       <button class="btn small" data-act="disconnect-cal">Disconnect calendar</button>
     </div>
-    <p class="hint more">Use Outlook, iCloud or another calendar? Anything you subscribe to inside Google Calendar already
+    <p class="hint more-cal">Use Outlook, iCloud or another calendar? Anything you subscribe to inside Google Calendar already
       shows up here. If you need a direct connection to something else,
       <a href="<?= h(REPO_URL) ?>/issues/new" target="_blank" rel="noopener">get in touch</a>.</p>
   </section>
@@ -176,11 +178,14 @@ $v = (string) @filemtime(__DIR__ . '/assets/app.js');
 <?php if (!local_mode()): ?>
   <section>
     <h3>Password</h3>
-    <div class="row">
-      <input id="pw-cur" type="password" placeholder="Current password" aria-label="Current password" autocomplete="current-password">
-      <input id="pw-new" type="password" placeholder="New password (12+ characters)" aria-label="New password" autocomplete="new-password">
-      <button class="btn" data-act="change-pw">Change</button>
-    </div>
+    <?php /* Its own form, with the user name in it: otherwise the browser's password manager takes the
+             first text box on the page (the brain dump) for the user name and offers saved logins there. */ ?>
+    <form class="row" id="pw-form" method="post" action="./">
+      <input type="text" name="username" autocomplete="username" value="<?= h(credentials()['username']) ?>" readonly hidden>
+      <input id="pw-cur" name="current-password" type="password" placeholder="Current password" aria-label="Current password" autocomplete="current-password">
+      <input id="pw-new" name="new-password" type="password" placeholder="New password (12+ characters)" aria-label="New password" autocomplete="new-password">
+      <button class="btn" type="submit">Change</button>
+    </form>
   </section>
 <?php endif; ?>
 

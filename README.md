@@ -36,7 +36,9 @@ What you don't finish goes back to the brain dump the next day, marked "carried"
 - **Time blocks back to your calendar.** One button writes the day's blocks to a separate Google calendar named "Planner". Run it again and it replaces them, never duplicates.
 - **Projects in color.** Give each project a color; blocks and dots take it everywhere.
 - **Drag and drop, 15-minute snap, resize from the bottom edge, undo on delete.**
-- **Light and dark**, following your system.
+- **Subtasks and notes.** The ⋯ on a task opens a checklist and a notes box under it.
+- **Two things at once.** Tasks can share a time on the timeline; they sit side by side.
+- **Dark and vivid**, with a light look one click away.
 - **Yours.** Tasks live in one SQLite file on your machine. The app is plain PHP and plain JavaScript: no frameworks, no build step, nothing to keep updated.
 
 ## Run it on your computer

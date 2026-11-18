@@ -2,7 +2,7 @@
 'use strict';
 
 const H = 52, SNAP = 15, DURS = [15, 30, 45, 60, 90, 120, 180];
-const PALETTE = ['#f2a7b8', '#8fc79a', '#f0b27a', '#85a9e0', '#c9a0dc', '#e8c468'];
+const PALETTE = ['#ff5fa8', '#4ade80', '#ff9f43', '#4da3ff', '#c77dff', '#ffd23f'];
 const csrf = document.querySelector('meta[name=csrf]').content;
 const $ = id => document.getElementById(id);
 
@@ -11,6 +11,7 @@ let CAL = { connected: false, events: [], allDay: [], loading: false };
 let DAY = dayStr(new Date());
 let drag = null;       // { id, off } while a task is being dragged
 let editing = false;   // true while a title is being renamed (pauses re-rendering)
+const open = new Set(); // ids of the tasks whose subtasks and notes are showing
 
 // ---------- helpers ----------
 function dayStr(d) { return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0'); }
@@ -19,16 +20,16 @@ function shiftDay(s, n) { const d = dayDate(s); d.setDate(d.getDate() + n); retu
 const hm = m => String(Math.floor(m / 60)).padStart(2, '0') + ':' + String(m % 60).padStart(2, '0');
 const durTxt = m => m < 60 ? m + ' m' : (m % 60 ? Math.floor(m / 60) + ' h ' + m % 60 : m / 60 + ' h');
 const esc = s => String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-const safeColor = c => /^#[0-9a-f]{6}$/i.test(c || '') ? c : '#d8d2c6';
-const proj = id => S.projects.find(p => p.id === id) || { id: null, name: 'No project', color: '#d8d2c6' };
+const safeColor = c => /^#[0-9a-f]{6}$/i.test(c || '') ? c : '#8f8ab8';
+const proj = id => S.projects.find(p => p.id === id) || { id: null, name: 'No project', color: '#8f8ab8' };
 const task = id => S.tasks.find(t => t.id === id);
 const startMin = () => S.settings.dayStart * 60;
 const endMin = () => S.settings.dayEnd * 60;
 function ink(hex) {
   const m = /^#(..)(..)(..)$/.exec(hex);
-  if (!m) return '#2b2a27';
+  if (!m) return '#17142e';
   const l = (.299 * parseInt(m[1], 16) + .587 * parseInt(m[2], 16) + .114 * parseInt(m[3], 16)) / 255;
-  return l > .55 ? '#2b2a27' : '#fff';
+  return l > .55 ? '#17142e' : '#fff';
 }
 /** Shows a short message; `action` ({ label, run }) adds a button to it, such as Undo. */
 function toast(msg, action) {
@@ -112,11 +113,31 @@ const dayTasks = () => S.tasks.filter(t => t.day === DAY);
 const scheduled = () => dayTasks().filter(t => t.start !== null);
 
 /** Why a block cannot go there, or '' when it can. */
-function conflict(id, s, d) {
+function conflict(s, d) {
   if (s < startMin() || s + d > endMin()) return 'Outside your day hours';
   for (const b of booked()) if (s < b.e && s + d > b.s) return 'Booked: ' + b.title;
-  for (const t of scheduled()) if (t.id !== id && s < t.start + t.dur && s + d > t.start) return 'Overlaps another block';
   return '';
+}
+
+/**
+ * Tasks may share a time. Those that do sit side by side: returns, for each task id, its
+ * column and how many columns its group of overlapping tasks needs.
+ */
+function lanes(list) {
+  const out = new Map();
+  let group = [], ends = [], groupEnd = -1;
+  const close = () => { group.forEach(t => { out.get(t.id).cols = ends.length; }); group = []; ends = []; };
+  list.slice().sort((a, b) => a.start - b.start || a.id - b.id).forEach(t => {
+    if (group.length && t.start >= groupEnd) close();
+    let col = ends.findIndex(e => e <= t.start);
+    if (col < 0) col = ends.length;
+    ends[col] = t.start + t.dur;
+    out.set(t.id, { col: col, cols: 1 });
+    group.push(t);
+    groupEnd = Math.max(groupEnd, t.start + t.dur);
+  });
+  close();
+  return out;
 }
 
 function freeMinutes() {
@@ -128,10 +149,34 @@ function freeMinutes() {
 }
 
 // ---------- changes ----------
+/** Sends a change. The answer is only taken over if nothing newer has changed the task meanwhile. */
+function save(t, patch) {
+  const rev = t.rev = (t.rev || 0) + 1;
+  return api('task_update', { id: t.id, patch: patch })
+    .then(d => { if (t.rev === rev) Object.assign(t, d.task); })
+    .catch(saveFailed);
+}
+
 function update(t, patch) {
   Object.assign(t, patch);
   render();
-  api('task_update', { id: t.id, patch: patch }).then(d => { Object.assign(t, d.task); }).catch(saveFailed);
+  save(t, patch);
+}
+
+// notes are saved a moment after the last keystroke, and at once when the box is left
+const noteTimers = {};
+function notesChanged(t, text) {
+  t.notes = text;
+  t.rev = (t.rev || 0) + 1;            // an answer still on its way must not bring back older text
+  clearTimeout(noteTimers[t.id]);
+  noteTimers[t.id] = setTimeout(() => flushNotes(t), 700);
+  document.querySelectorAll(`[data-act="more"][data-id="${t.id}"]`).forEach(b => { b.textContent = moreLabel(t); b.classList.toggle('has', hasMore(t)); });
+}
+function flushNotes(t) {
+  if (!noteTimers[t.id]) return;
+  clearTimeout(noteTimers[t.id]);
+  delete noteTimers[t.id];
+  save(t, { notes: t.notes });
 }
 
 async function addTask(title, p) {
@@ -151,7 +196,7 @@ function cycleDur(t) {
   const i = DURS.indexOf(t.dur);
   for (let k = 1; k <= DURS.length; k++) {
     const d = DURS[(i + k) % DURS.length];
-    if (t.start === null || !conflict(t.id, t.start, d)) { update(t, { dur: d }); return; }
+    if (t.start === null || !conflict(t.start, d)) { update(t, { dur: d }); return; }
   }
 }
 
@@ -162,6 +207,7 @@ function toggleDone(t) {
 }
 
 function removeTask(t) {
+  clearTimeout(noteTimers[t.id]); delete noteTimers[t.id]; open.delete(t.id);
   S.tasks = S.tasks.filter(x => x !== t); render();
   api('task_delete', { id: t.id })
     .then(() => toast('Task deleted.', { label: 'Undo', run() { restoreTask(t); } }))
@@ -175,14 +221,14 @@ function removeTask(t) {
 async function restoreTask(old) {
   try {
     const d = await api('task_add', { title: old.title, p: old.p });
-    const patch = { dur: old.dur };
+    const patch = { dur: old.dur, notes: old.notes || '', subs: old.subs || [] };
     if (old.where !== 'dump') {
       const same = old.day === DAY;
       const slotFree = same && !dayTasks().some(x => x.where === 'top' && x.slot === old.slot);
       patch.day = old.day;
       patch.where = old.where === 'top' && slotFree ? 'top' : 'also';
       if (patch.where === 'top') patch.slot = old.slot;
-      if (same && old.start !== null && !conflict(0, old.start, old.dur)) patch.start = old.start;
+      if (same && old.start !== null && !conflict(old.start, old.dur)) patch.start = old.start;
       if (old.done) patch.done = true;
     }
     await api('task_update', { id: d.task.id, patch: patch });
@@ -191,32 +237,65 @@ async function restoreTask(old) {
 }
 
 // ---------- rendering ----------
+const hasMore = t => !!(t.subs.length || t.notes);
+/** What the button that opens subtasks and notes shows: "2/5" subtasks done, a pen when there are notes. */
+function moreLabel(t) {
+  const n = t.subs.length ? t.subs.filter(s => s.done).length + '/' + t.subs.length : '';
+  return (n + (t.notes ? ' ✎' : '')).trim() || '⋯';
+}
+function moreBtn(t) {
+  return `<button class="more ${hasMore(t) ? 'has' : ''}" data-act="more" data-id="${t.id}" title="Subtasks and notes" aria-expanded="${open.has(t.id)}">${moreLabel(t)}</button>`;
+}
+
+/** The panel under a task: its subtasks, a box to add one, and its notes. */
+function details(t) {
+  if (!open.has(t.id)) return '';
+  return `<div class="details" data-details="${t.id}">
+    <ul class="subs">${t.subs.map((s, i) => `<li class="${s.done ? 'done' : ''}">
+      <button class="check ${s.done ? 'on' : ''}" data-act="sub-done" data-id="${t.id}" data-i="${i}" title="Done">✓</button>
+      <span>${esc(s.title)}</span>
+      <button class="x" title="Delete subtask" data-act="sub-del" data-id="${t.id}" data-i="${i}">×</button></li>`).join('')}</ul>
+    <input class="subadd" type="text" name="subtask" data-subadd="${t.id}" placeholder="Add a subtask and press Enter…" aria-label="New subtask" autocomplete="off" maxlength="300">
+    <textarea class="notes" name="notes" data-notes="${t.id}" placeholder="Notes…" aria-label="Notes" rows="2" maxlength="5000">${esc(t.notes)}</textarea>
+  </div>`;
+}
+
 function card(t) {
   const p = proj(t.p);
-  return `<div class="item ${t.done ? 'done' : ''}" draggable="true" data-id="${t.id}">
+  return `<div class="task"><div class="item ${t.done ? 'done' : ''}" draggable="true" data-id="${t.id}" style="border-left-color:${safeColor(p.color)}">
     <button class="check ${t.done ? 'on' : ''}" data-act="done" data-id="${t.id}" title="Done">✓</button>
     <button class="dot" style="background:${safeColor(p.color)}" title="${esc(p.name)} (click to change)" data-act="proj" data-id="${t.id}"></button>
     <span class="t" title="${esc(t.title)} (double-click to rename)" data-title="${t.id}">${esc(t.title)}</span>
     ${t.carried && t.where === 'dump' ? '<span class="carried" title="Left over from an earlier day">carried</span>' : ''}
     ${t.start !== null ? `<span class="at">${hm(t.start)}</span>` : ''}
+    ${moreBtn(t)}
     <button class="dur" title="Click to change length" data-act="dur" data-id="${t.id}">${durTxt(t.dur)}</button>
-    <button class="x" title="Delete" data-act="del" data-id="${t.id}">×</button></div>`;
+    <button class="x" title="Delete" data-act="del" data-id="${t.id}">×</button></div>${details(t)}</div>`;
 }
 
 function renderLists() {
+  // a re-draw replaces the boxes; whatever is being typed in one of them is carried over
+  const a = document.activeElement;
+  const typing = a && a.matches && a.matches('.subadd, .notes')
+    ? { sel: a.dataset.subadd ? `[data-subadd="${a.dataset.subadd}"]` : `[data-notes="${a.dataset.notes}"]`, v: a.value, s: a.selectionStart, e: a.selectionEnd, y: a.scrollTop }
+    : null;
   $('z-dump').innerHTML = S.tasks.filter(t => t.where === 'dump').map(card).join('');
   $('z-also').innerHTML = dayTasks().filter(t => t.where === 'also').map(card).join('');
   let top = '';
   for (let i = 0; i < 3; i++) {
     const t = dayTasks().find(x => x.where === 'top' && x.slot === i);
-    if (!t) { top += `<div class="slot empty" data-slot="${i}">Drag main task ${i + 1} here</div>`; continue; }
+    if (!t) { top += `<div class="task"><div class="slot empty" data-slot="${i}">Drag main task ${i + 1} here</div></div>`; continue; }
     const p = proj(t.p);
-    top += `<div class="slot ${t.done ? 'done' : ''}" draggable="true" data-id="${t.id}" data-slot="${i}" style="border-left-color:${safeColor(p.color)}">
+    top += `<div class="task"><div class="slot ${t.done ? 'done' : ''}" draggable="true" data-id="${t.id}" data-slot="${i}" style="border-left-color:${safeColor(p.color)}">
       <span class="n">${i + 1}</span><div class="body"><b title="${esc(t.title)} (double-click to rename)" data-title="${t.id}">${esc(t.title)}</b>
-      <span class="meta">${esc(p.name)} · <button class="dur" data-act="dur" data-id="${t.id}">${durTxt(t.dur)}</button>${t.start !== null ? `<span class="at">${hm(t.start)}</span>` : '<span>not scheduled yet</span>'}</span></div>
-      <button class="check ${t.done ? 'on' : ''}" data-act="done" data-id="${t.id}" title="Done">✓</button></div>`;
+      <span class="meta">${esc(p.name)} · <button class="dur" data-act="dur" data-id="${t.id}">${durTxt(t.dur)}</button>${t.start !== null ? `<span class="at">${hm(t.start)}</span>` : '<span>not scheduled yet</span>'}${moreBtn(t)}</span></div>
+      <button class="check ${t.done ? 'on' : ''}" data-act="done" data-id="${t.id}" title="Done">✓</button></div>${details(t)}</div>`;
   }
   $('top3').innerHTML = top;
+  if (typing) {
+    const el = document.querySelector(typing.sel);
+    if (el) { el.value = typing.v; el.focus({ preventScroll: true }); el.setSelectionRange(typing.s, typing.e); el.scrollTop = typing.y; }
+  }
 }
 
 function renderProjects() {
@@ -234,11 +313,13 @@ function renderTimeline() {
   let h = '';
   for (let i = S.settings.dayStart; i < S.settings.dayEnd; i++) h += `<div class="hr"><i>${String(i).padStart(2, '0')}:00</i></div>`;
   h += booked().map(b => `<div class="blk booked" title="${esc(b.title)} · ${esc(b.calendar)}" style="top:${(b.s - s0) / 60 * H + 1}px;height:${(b.e - b.s) / 60 * H - 2}px">🔒 ${esc(b.title)}<small>${hm(b.s)}–${hm(b.e)}</small></div>`).join('');
+  const lane = lanes(scheduled());
   h += scheduled().map(t => {
     const p = proj(t.p), c = safeColor(p.color), n = t.where === 'top' ? ['①', '②', '③'][t.slot] + ' ' : '';
+    const l = lane.get(t.id), side = l.cols > 1 ? `left:calc(8px + (100% - 16px) * ${l.col} / ${l.cols});right:auto;width:calc((100% - 16px) / ${l.cols} - ${l.col < l.cols - 1 ? 3 : 0}px);` : '';
     const top = Math.max(t.start, s0), end = Math.min(t.start + t.dur, endMin());
     if (end <= top) return '';
-    return `<div class="blk ${t.done ? 'done' : ''}" draggable="true" data-id="${t.id}" data-blk="1" title="${esc(t.title)}" style="top:${(top - s0) / 60 * H + 1}px;height:${(end - top) / 60 * H - 2}px;background:${c};color:${ink(c)}">${n}${esc(t.title)}<small>${hm(t.start)}–${hm(t.start + t.dur)}</small><button class="x" title="Take off the timeline" data-act="unschedule" data-id="${t.id}">×</button><span class="rs" data-rs="${t.id}"></span></div>`;
+    return `<div class="blk ${t.done ? 'done' : ''}" draggable="true" data-id="${t.id}" data-blk="1" title="${esc(t.title)}" style="top:${(top - s0) / 60 * H + 1}px;height:${(end - top) / 60 * H - 2}px;${side}background-color:${c};color:${ink(c)}">${n}${esc(t.title)}<small>${hm(t.start)}–${hm(t.start + t.dur)}</small>${hasMore(t) ? `<small>${moreLabel(t)}</small>` : ''}<button class="x" title="Take off the timeline" data-act="unschedule" data-id="${t.id}">×</button><span class="rs" data-rs="${t.id}"></span></div>`;
   }).join('');
   const now = new Date(), nowMin = now.getHours() * 60 + now.getMinutes();
   if (DAY === dayStr(now) && nowMin >= s0 && nowMin <= endMin()) h += `<div class="now" style="top:${(nowMin - s0) / 60 * H}px"></div>`;
@@ -246,8 +327,8 @@ function renderTimeline() {
   $('tl').innerHTML = h;
   $('allday').innerHTML = CAL.allDay.map(e => `<span class="chip" title="${esc(e.calendar)}">All day: ${esc(e.title)}</span>`).join('');
   $('tlhint').textContent = S.calendarConnected
-    ? "Striped blocks come from your calendar and can't be planned over."
-    : 'Your calendar is not connected yet, so booked time is not shown. Connect it in Settings (⚙).';
+    ? "Striped blocks come from your calendar and can't be planned over. Your own tasks can share a time: they sit side by side."
+    : 'Tasks can share a time: they sit side by side. Your calendar is not connected yet, so booked time is not shown. Connect it in Settings (⚙).';
   $('push').hidden = !S.calendarConnected;
 }
 
@@ -289,6 +370,23 @@ const actions = {
   done(t) { toggleDone(t); },
   del(t) { removeTask(t); },
   unschedule(t) { update(t, { start: null }); },
+  more(t) {
+    if (open.has(t.id)) { flushNotes(t); open.delete(t.id); } else open.add(t.id);
+    render();
+    if (open.has(t.id) && !hasMore(t)) { const el = document.querySelector(`[data-subadd="${t.id}"]`); if (el) el.focus(); }
+  },
+  'sub-done'(t, btn) {
+    const i = +btn.dataset.i;
+    update(t, { subs: t.subs.map((s, k) => k === i ? { title: s.title, done: !s.done } : s) });
+  },
+  'sub-del'(t, btn) { update(t, { subs: t.subs.filter((s, k) => k !== +btn.dataset.i) }); },
+  theme(_, btn) {
+    const next = document.documentElement.dataset.theme === 'light' ? 'dark' : 'light';
+    document.documentElement.dataset.theme = next;
+    document.querySelector('meta[name=color-scheme]').content = next;
+    btn.textContent = next === 'light' ? '☾' : '☀';
+    document.cookie = 'planner_theme=' + next + ';path=/;max-age=34560000;samesite=strict';
+  },
   'refresh-cal'() { loadCalendar(true); },
   async push(_, btn) {
     if (!S.calendarConnected) { openSettings(); toast('Connect your calendar first.'); return; }
@@ -366,7 +464,36 @@ document.addEventListener('click', e => {
   const el = e.target.closest('[data-act]');
   if (!el) return;
   const fn = actions[el.dataset.act];
-  if (fn) fn(el.dataset.id ? task(+el.dataset.id) : null, el);
+  if (!fn) return;
+  const t = el.dataset.id ? task(+el.dataset.id) : null;
+  if (el.dataset.id && !t && el.dataset.act !== 'del-project') return;        // the task is gone
+  fn(t, el);
+});
+
+// subtasks and notes
+document.addEventListener('keydown', e => {
+  const id = e.target.dataset && e.target.dataset.subadd;
+  if (!id || e.key !== 'Enter') return;
+  const t = task(+id), v = e.target.value.trim();
+  if (!t || !v) return;
+  if (t.subs.length >= 50) { toast('A task holds up to 50 subtasks.'); return; }
+  e.target.value = '';
+  update(t, { subs: t.subs.concat({ title: v, done: false }) });
+});
+document.addEventListener('input', e => {
+  const id = e.target.dataset && e.target.dataset.notes;
+  if (id && task(+id)) notesChanged(task(+id), e.target.value);
+});
+document.addEventListener('focusout', e => {
+  const id = e.target.dataset && e.target.dataset.notes;
+  if (id && task(+id)) flushNotes(task(+id));
+});
+addEventListener('pagehide', () => { Object.keys(noteTimers).forEach(id => { const t = task(+id); if (t) flushNotes(t); }); });
+
+// the password boxes sit in a form (so the browser files them correctly); it is sent from here
+document.addEventListener('submit', e => {
+  e.preventDefault();
+  if (e.target.id === 'pw-form') actions['change-pw']();
 });
 
 // rename on double-click
@@ -443,7 +570,7 @@ function dragMove(target, y) {
   document.querySelectorAll('.over').forEach(x => x.classList.remove('over'));
   const g = $('ghost');
   if (target && target.closest('#tl')) {
-    const t = task(drag.id), s = dropTime(y), bad = conflict(t.id, s, t.dur);
+    const t = task(drag.id), s = dropTime(y), bad = conflict(s, t.dur);
     g.style.display = 'block';
     g.style.top = ((s - startMin()) / 60 * H + 1) + 'px';
     g.style.height = (t.dur / 60 * H - 2) + 'px';
@@ -462,8 +589,8 @@ function dragDrop(target, y) {
   const t = task(drag.id);
   if (!t || !target) return;
   if (target.closest('#tl')) {
-    const s = dropTime(y), bad = conflict(t.id, s, t.dur);
-    if (bad) { toast(bad + '. Pick a free gap.'); return; }
+    const s = dropTime(y), bad = conflict(s, t.dur);
+    if (bad) { toast(bad + '. Pick another time.'); return; }
     const patch = { start: s, day: DAY };
     if (t.where === 'dump') patch.where = 'also';
     update(t, patch);
@@ -575,9 +702,9 @@ function resizeStart(t, y0) {
   return {
     move(y) {
       const d = Math.max(SNAP, Math.round((d0 + (y - y0) / H * 60) / SNAP) * SNAP);
-      if (d !== t.dur && !conflict(t.id, t.start, d)) { t.dur = d; render(); }
+      if (d !== t.dur && !conflict(t.start, d)) { t.dur = d; render(); }
     },
-    end() { if (t.dur !== d0) api('task_update', { id: t.id, patch: { dur: t.dur } }).catch(saveFailed); }
+    end() { if (t.dur !== d0) save(t, { dur: t.dur }); }
   };
 }
 
@@ -653,6 +780,7 @@ $('settings').addEventListener('click', e => { if (e.target === e.currentTarget)
 startDay();
 setInterval(() => { if (!drag && !editing) renderTimeline(); }, 60000);          // keeps the "now" line moving
 document.addEventListener('visibilitychange', () => {                              // new day or stale tab: reload
-  if (document.hidden || drag || editing) return;
+  const a = document.activeElement;
+  if (document.hidden || drag || editing || (a && a.matches('.subadd, .notes'))) return;
   startDay();
 });

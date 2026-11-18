@@ -126,6 +126,28 @@ function db(): PDO
             PRAGMA user_version = 1;
         ");
     }
+    if ($version < 2) {
+        // Notes and subtasks live on the task row (subtasks as a JSON list). The starter
+        // project colors get brighter, unless they were changed by hand.
+        $pdo->exec('BEGIN IMMEDIATE');          // two requests at once must not both add the columns
+        try {
+            if ((int) $pdo->query('PRAGMA user_version')->fetchColumn() < 2) {
+                $pdo->exec("
+                    ALTER TABLE tasks ADD COLUMN notes TEXT NOT NULL DEFAULT '';
+                    ALTER TABLE tasks ADD COLUMN subs TEXT NOT NULL DEFAULT '[]';
+                    UPDATE projects SET color = '#ff7a59' WHERE color = '#e9967a';
+                    UPDATE projects SET color = '#2fd6c8' WHERE color = '#7fb7be';
+                    UPDATE projects SET color = '#a78bfa' WHERE color = '#9d8fd6';
+                    UPDATE projects SET color = '#ffc83d' WHERE color = '#b9b3a7';
+                    PRAGMA user_version = 2;
+                ");
+            }
+            $pdo->exec('COMMIT');
+        } catch (Throwable $e) {
+            $pdo->exec('ROLLBACK');
+            throw $e;
+        }
+    }
     return $pdo;
 }
 

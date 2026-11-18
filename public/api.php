@@ -51,7 +51,28 @@ function task_out(array $r): array
         'slot' => $r['slot'] === null ? null : (int) $r['slot'],
         'day' => $r['day'], 'start' => $r['start'] === null ? null : (int) $r['start'],
         'done' => (bool) $r['done'], 'carried' => (bool) $r['carried'],
+        'notes' => (string) $r['notes'],
+        'subs' => json_decode((string) $r['subs'], true) ?: [],
     ];
+}
+
+function clean_notes($v): string
+{
+    if (!is_string($v)) fail('Bad notes');
+    return mb_substr(str_replace(["\r\n", "\r"], "\n", $v), 0, 5000);
+}
+
+/** Subtasks arrive as a whole list: [{title, done}, ...]. Returns the JSON to store. */
+function clean_subs($v): string
+{
+    if (!is_array($v) || $v !== array_values($v) || count($v) > 50) fail('Bad subtasks');
+    $out = [];
+    foreach ($v as $s) {
+        if (!is_array($s)) fail('Bad subtasks');
+        $title = mb_substr(trim(preg_replace('/\s+/u', ' ', (string) ($s['title'] ?? ''))), 0, 300);
+        if ($title !== '') $out[] = ['title' => $title, 'done' => !empty($s['done'])];
+    }
+    return json_encode($out, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
 }
 
 function get_task(int $id): array
@@ -146,6 +167,8 @@ switch ($action) {
             if ($d < 5 || $d > 720) fail('Bad length');
             $t['dur'] = $d;
         }
+        if (array_key_exists('notes', $patch)) $t['notes'] = clean_notes($patch['notes']);
+        if (array_key_exists('subs', $patch)) $t['subs'] = clean_subs($patch['subs']);
         if (array_key_exists('where', $patch)) {
             if (!in_array($patch['where'], ['dump', 'top', 'also'], true)) fail('Bad list');
             $t['place'] = $patch['where'];
@@ -176,9 +199,9 @@ switch ($action) {
         if ($t['place'] !== 'top') $t['slot'] = null;
         elseif ($t['slot'] === null) fail('A main task needs a slot');
         if ($t['place'] !== 'dump') $t['carried'] = 0;
-        $pdo->prepare('UPDATE tasks SET title=?, project_id=?, dur=?, place=?, slot=?, day=?, start=?, done=?, done_at=?, carried=? WHERE id=?')
+        $pdo->prepare('UPDATE tasks SET title=?, project_id=?, dur=?, place=?, slot=?, day=?, start=?, done=?, done_at=?, carried=?, notes=?, subs=? WHERE id=?')
             ->execute([$t['title'], $t['project_id'], $t['dur'], $t['place'], $t['slot'], $t['day'], $t['start'],
-                       $t['done'], $t['done_at'], $t['carried'], $t['id']]);
+                       $t['done'], $t['done_at'], $t['carried'], $t['notes'], $t['subs'], $t['id']]);
         reply(['task' => task_out(get_task((int) $t['id']))]);
 
     case 'task_delete':
@@ -259,7 +282,7 @@ switch ($action) {
         $url = setting('bridge_url');
         if (!$url) fail('Connect your calendar first (Settings)');
         $st = $pdo->prepare('SELECT t.title, t.start, t.dur, p.color FROM tasks t LEFT JOIN projects p ON p.id = t.project_id
-                             WHERE t.day = ? AND t.start IS NOT NULL ORDER BY t.start');
+                             WHERE t.day = ? AND t.start IS NOT NULL ORDER BY t.start, t.id');
         $st->execute([$day]);
         $blocks = array_map(fn($r) => ['title' => $r['title'], 'start' => (int) $r['start'], 'dur' => (int) $r['dur'],
                                        'color' => $r['color']], $st->fetchAll());

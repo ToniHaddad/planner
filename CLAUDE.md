@@ -47,7 +47,10 @@ machine paths. Private notes for the owner's own deployment live in `CLAUDE.loca
   not a blocklist: blocklists were bypassed with `///data/...` and NTFS `::$DATA` paths. A new kind of asset
   must be added to that pattern.
 - **Data model:** a task is in the brain dump (`place = dump`, no day) or planned on a day (`top` with slot 0-2,
-  or `also`), optionally with a start minute. Unfinished tasks from past days go back to the dump (`rollover`,
+  or `also`), optionally with a start minute. A task also carries `notes` (text) and `subs` (its subtasks, a JSON
+  list of `{title, done}` stored on the task row and always sent as a whole list). Tasks may share a time: only
+  calendar events block a drop; `lanes()` in `app.js` lays overlapping blocks side by side. The schema is
+  versioned with `PRAGMA user_version` in `db()`; a schema change is a new `if ($version < N)` step there. Unfinished tasks from past days go back to the dump (`rollover`,
   called by the browser with its local date).
 - **Calendar:** the server never holds Google credentials. An Apps Script web app in the user's Google account
   ("the bridge") answers `events` and `push` for requests carrying the shared key from `data/config.php`. It
@@ -61,7 +64,13 @@ machine paths. Private notes for the owner's own deployment live in `CLAUDE.loca
   260 ms, then move; the page scrolls when the finger is near an edge). Both call `dragMove()` and `dragDrop()`.
   Nothing may re-render the board while a touch drag is active: a touch only reports to the element it started on.
 - **Front end:** a delete is sent at once; "Undo" adds the task again (`restoreTask`), without its slot or time
-  if those were taken meanwhile. Colors are CSS variables with a `prefers-color-scheme: dark` set.
+  if those were taken meanwhile. A re-draw replaces the subtask and notes boxes, so `renderLists()` carries
+  over what is being typed; notes are saved 700 ms after the last keystroke. `save()` ignores the answer to an
+  older save once the task has changed again. Colors are CSS variables: dark is the standard look, and the
+  sun button sets the cookie `planner_theme=light`, which `index.php` turns into `data-theme` on `<html>`.
+- **Password pop-ups:** the password boxes in Settings sit in their own form with a user-name field. Without
+  it, Chrome's password manager takes the first text box on the page (the brain dump) for the user name and
+  offers saved logins there. Keep any new password field inside such a form.
 
 ## Rules
 

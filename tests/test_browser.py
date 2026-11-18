@@ -63,6 +63,10 @@ def main():
             page.on("pageerror", lambda e: problems.append(str(e)))
             run(page)
             run_touch(browser, problems)
+            # the one deliberate wrong-password try in run() makes the browser log one 400; anything else is a problem
+            expected = "Failed to load resource: the server responded with a status of 400 (Bad Request)"
+            if expected in problems:
+                problems.remove(expected)
             check("no console errors or blocked scripts", not problems, str(problems[:3]))
             if shot:
                 page.screenshot(path=shot, full_page=True)
@@ -172,6 +176,114 @@ def run(page):
           and page.locator("#z-dump .item").count() == 1)
     page.click("[data-act=today]")
     page.locator("#tl .blk[data-blk]").nth(1).wait_for()
+
+    # --- subtasks and notes ---
+    add(page, "Detail task")
+    card = "#z-dump .task:has(.item:has-text('Detail task'))"
+    more = "#z-dump .item:has-text('Detail task') [data-act=more]"
+    check("the more button starts as three dots", page.locator(more).inner_text().strip() == "⋯")
+    page.click(more)
+    page.wait_for_selector(card + " .details")
+    check("the more button opens a panel under the task", page.locator(card + " .details .subadd").count() == 1
+          and page.locator(card + " .details .notes").count() == 1)
+    sub_in = card + " .subadd"
+    page.fill(sub_in, "Buy paint")
+    page.press(sub_in, "Enter")
+    page.locator(card + " .subs li").first.wait_for()
+    page.keyboard.type("Sand the door")
+    page.keyboard.press("Enter")
+    for _ in range(30):
+        if page.locator(card + " .subs li").count() == 2:
+            break
+        page.wait_for_timeout(100)
+    check("two subtasks appear after two Enters", page.locator(card + " .subs li").count() == 2)
+    check("the subtask box keeps the focus for the next one",
+          page.evaluate("document.activeElement.classList.contains('subadd')")
+          and page.locator(sub_in).input_value() == "")
+    check("the more button counts subtasks: 0/2", page.locator(more).inner_text().strip() == "0/2")
+    page.locator(card + " .subs li").first.locator("[data-act=sub-done]").click()
+    page.locator(more + ":has-text('1/2')").wait_for()
+    check("ticking a subtask moves the count to 1/2", page.locator(card + " .subs li.done").count() == 1)
+    second = page.locator(card + " .subs li").nth(1)
+    second.hover()
+    second.locator("[data-act=sub-del]").click()
+    page.locator(more + ":has-text('1/1')").wait_for()
+    check("deleting a subtask leaves 1/1", page.locator(card + " .subs li").count() == 1
+          and "Buy paint" in page.locator(card + " .subs li").inner_text())
+
+    page.fill(sub_in, "<b>bold</b>")
+    page.press(sub_in, "Enter")
+    page.locator(card + " .subs li").nth(1).wait_for()
+    check("markup typed as a subtask is shown as text", page.locator(card + " .details b").count() == 0
+          and "<b>bold</b>" in page.locator(card + " .subs li").nth(1).inner_text())
+
+    note = "Call Sam first\n<i>not italic</i> <img src=x onerror=alert(1)>"
+    page.locator(card + " .notes").fill(note)
+    page.wait_for_timeout(1200)                       # notes are saved 700 ms after the last keystroke
+    check("typing notes puts a pen on the more button", "✎" in page.locator(more).inner_text()
+          and page.locator(more).inner_text().strip() == "1/2 ✎", page.locator(more).inner_text())
+    check("markup typed into notes creates no element", page.locator(card + " .details i, " + card + " .details img").count() == 0)
+    page.reload()
+    page.wait_for_selector("#top3 .slot")
+    check("panels are closed again after a reload", page.locator("#z-dump .details").count() == 0)
+    page.click(more)
+    page.wait_for_selector(card + " .details")
+    check("subtasks are still there after a reload", page.locator(card + " .subs li").count() == 2
+          and page.locator(card + " .subs li.done").count() == 1)
+    check("notes are still there after a reload", page.locator(card + " .notes").input_value() == note)
+    check("the more button still shows count and pen", page.locator(more).inner_text().strip() == "1/2 ✎")
+    check("markup in notes and subtasks is still plain text on reload", page.locator(card + " .details i, "
+          + card + " .details b, " + card + " .details img").count() == 0)
+    page.click("#z-dump .item:has-text('Detail task') [data-act=del]")
+    page.wait_for_timeout(300)
+
+    # --- two tasks at the same time ---
+    add(page, "Twin task")
+    tl_w = page.locator("#tl").bounding_box()["width"]
+    drop_on_timeline(page, "#z-dump .item:has-text('Twin task')", 60)       # 08:00, where "Write the report" is
+    twin = page.locator("#tl .blk[data-blk]:has-text('Twin task')")
+    first = page.locator("#tl .blk[data-blk]:has-text('Write the report')")
+    twin.wait_for()
+    page.wait_for_timeout(300)
+    check("both tasks sit on the timeline at the same time", twin.count() == 1 and first.count() == 1
+          and "08:00" in twin.inner_text() and "08:00" in first.inner_text(), twin.inner_text() if twin.count() else "no twin")
+    a, b = first.bounding_box(), twin.bounding_box()
+    check("same-time blocks start at the same height", abs(a["y"] - b["y"]) < 3, f"{a['y']} vs {b['y']}")
+    check("same-time blocks do not overlap sideways",
+          a["x"] + a["width"] <= b["x"] + 1 or b["x"] + b["width"] <= a["x"] + 1, f"{a} {b}")
+    check("same-time blocks are about half the timeline each",
+          all(0.35 * tl_w < r["width"] < 0.6 * tl_w for r in (a, b)), f"{a['width']} {b['width']} of {tl_w}")
+    page.click("#z-also .item:has-text('Twin task') [data-act=del]")
+    page.wait_for_timeout(300)
+    check("the twin is gone again", page.locator("#tl .blk[data-blk]").count() == 2)
+
+    # --- theme ---
+    check("the page starts dark", page.get_attribute("html", "data-theme") == "dark")
+    page.click("[data-act=theme]")
+    check("the sun button switches to light", page.get_attribute("html", "data-theme") == "light")
+    page.reload()
+    page.wait_for_selector("#top3 .slot")
+    check("light stays after a reload", page.get_attribute("html", "data-theme") == "light")
+    page.click("[data-act=theme]")
+    check("the button switches back to dark", page.get_attribute("html", "data-theme") == "dark")
+    page.reload()
+    page.wait_for_selector("#top3 .slot")
+    check("dark stays after a reload", page.get_attribute("html", "data-theme") == "dark")
+
+    # --- Enter in the password form must not send the page away (one wrong try only: it counts toward the lockout) ---
+    page.evaluate("window.__still_here = true")
+    url = page.url
+    page.click("[data-act=settings-open]")
+    page.fill("#pw-cur", "not the password")
+    page.fill("#pw-new", "a-new-long-password-1")
+    page.press("#pw-new", "Enter")
+    page.locator("#toast.on").wait_for()
+    page.wait_for_timeout(500)
+    check("Enter in the password form does not leave or reload the page",
+          page.url == url and page.evaluate("window.__still_here === true") and page.locator("#tl").count() == 1)
+    check("...and the wrong current password is reported", page.locator("#toast-msg").inner_text().strip() != ""
+          and "changed" not in page.locator("#toast-msg").inner_text().lower(), page.locator("#toast-msg").inner_text())
+    page.click("[data-act=settings-close]")
 
 
 class Finger:

@@ -68,19 +68,27 @@ def seed(c):
         _, r = c.api("task_add", {"title": title, "p": project})
         if patch:
             c.api("task_update", {"id": r["task"]["id"], "patch": patch})
+        return r["task"]["id"]
+
+    def sub(title, done=False):
+        return {"title": title, "done": done}
 
     add("Send the October invoice", 4, where="also", day=yesterday)       # becomes "carried"
     c.api("rollover", {"today": today})
     add("Reply to Sam about the workshop", 1)
-    add("Book the dentist", 2)
+    add("Book the dentist", 2, notes="Ask for a morning slot.")
     add("Read chapter 4 of the statistics book", 3)
     add("Renew car insurance", 4)
-    add("Finish the quarterly report", 1, where="top", slot=0, day=today, start=10 * 60, dur=120)
+    report = add("Finish the quarterly report", 1, where="top", slot=0, day=today, start=10 * 60, dur=120,
+                 subs=[sub("Pull the sales numbers", True), sub("Write the summary"), sub("Send to Dana for review")],
+                 notes="Numbers are in the shared folder.")
+    add("Water the plants", 2, where="also", day=today, start=18 * 60, dur=30)     # same time as the run
     add("Prepare slides for Thursday", 1, where="top", slot=1, day=today, start=13 * 60 + 30, dur=90)
     add("Run 5 km", 2, where="top", slot=2, day=today, start=18 * 60, dur=45)
     add("Review pull requests", 1, where="also", day=today, start=8 * 60, dur=60, done=True)
     add("Practise Spanish", 3, where="also", day=today, start=16 * 60 + 30, dur=30)
     add("Pay the electricity bill", 4, where="also", day=today, dur=15)
+    return report
 
 
 def main():
@@ -105,13 +113,13 @@ def main():
         c = T.Client()
         c.base = BASE
         c.csrf = re.search(r'name="csrf" content="([0-9a-f]+)"', c.raw("/?k=" + KEY)[1]).group(1)
-        seed(c)
+        report = seed(c)
 
         with sync_playwright() as pw:
             browser = pw.chromium.launch()
             for scheme in ("light", "dark"):
-                ctx = browser.new_context(viewport={"width": 1320, "height": 860}, device_scale_factor=2,
-                                          color_scheme=scheme, locale="en-GB")
+                ctx = browser.new_context(viewport={"width": 1320, "height": 900}, device_scale_factor=2, locale="en-GB")
+                ctx.add_cookies([{"name": "planner_theme", "value": scheme, "url": BASE}])
                 page = ctx.new_page()
                 # Mid-morning, so the red "now" line shows on the timeline.
                 page.clock.set_fixed_time(datetime.combine(date.today(), datetime.min.time()) + timedelta(hours=11, minutes=10))
@@ -131,6 +139,8 @@ def main():
                     page.click("[data-act=settings-close]")
                 else:
                     page.wait_for_selector("#tl .booked")
+                page.click(f"#top3 [data-act=more][data-id='{report}']")      # show a task's subtasks and notes
+                page.wait_for_selector("#top3 .details")
                 page.wait_for_timeout(4200)          # let the "Connected" message fade
                 page.mouse.move(5, 5)
                 page.screenshot(path=str(OUT / f"board-{scheme}.png"))

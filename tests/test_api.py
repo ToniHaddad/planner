@@ -10,6 +10,7 @@ import http.server
 import json
 import re
 import shutil
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -22,7 +23,7 @@ from datetime import date, timedelta
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-PORT, BRIDGE_PORT, LOCAL_PORT = 8791, 8792, 8793
+PORT, BRIDGE_PORT, LOCAL_PORT, MIGRATE_PORT = 8791, 8792, 8793, 8796
 BASE = f"http://127.0.0.1:{PORT}"
 passed = failed = 0
 pushed = []
@@ -133,6 +134,7 @@ def main():
                 time.sleep(0.1)
         run(site)
         run_local(work)
+        run_migration(work)
     finally:
         php.terminate()
         bridge.shutdown()
@@ -189,6 +191,52 @@ def run(site):
         check(f"bad change refused: {bad}", status == 400, str(r))
     status, r = c.api("task_update", {"id": t["id"], "patch": {"where": "dump"}})
     check("back to the dump clears day and time", r["task"]["day"] is None and r["task"]["start"] is None)
+
+    # --- notes and subtasks ---
+    check("a new task has empty notes and no subtasks", t.get("notes") == "" and t.get("subs") == [], str(t))
+    _, st = c.api("state", day=today)
+    check("state lists every task with notes and subs", st["tasks"] and all(
+        x.get("notes") == "" and x.get("subs") == [] for x in st["tasks"]), str(st["tasks"][:1]))
+    status, r = c.api("task_update", {"id": t["id"], "patch": {"notes": "line1\r\nline2"}})
+    check("notes keep only newline line ends", status == 200 and r["task"]["notes"] == "line1\nline2", str(r))
+    status, r = c.api("task_update", {"id": t["id"], "patch": {"notes": "é" * 6000}})
+    check("notes over 5000 characters are cut", status == 200 and r["task"]["notes"] == "é" * 5000)
+    for bad in (123, ["a"], None):
+        status, r = c.api("task_update", {"id": t["id"], "patch": {"notes": bad}})
+        check(f"non-text notes refused: {bad!r}", status == 400, str(r))
+    subs_in = [{"title": "  Buy   paint ", "done": False}, {"title": "", "done": True}, {"title": "Sand", "done": 1}]
+    status, r = c.api("task_update", {"id": t["id"], "patch": {"subs": subs_in}})
+    check("subtasks are tidied: spaces collapsed, empty dropped, done a boolean", status == 200 and r["task"]["subs"] ==
+          [{"title": "Buy paint", "done": False}, {"title": "Sand", "done": True}], str(r))
+    status, r = c.api("task_update", {"id": t["id"], "patch": {"subs": [{"title": f"s{i}"} for i in range(51)]}})
+    check("more than 50 subtasks refused", status == 400, str(r))
+    status, r = c.api("task_update", {"id": t["id"], "patch": {"subs": [{"title": f"s{i}"} for i in range(50)]}})
+    check("exactly 50 subtasks accepted", status == 200 and len(r["task"]["subs"]) == 50, str(r)[:200])
+    for bad in ("Buy paint", {"title": "x", "done": False}, 5, ["text"]):
+        status, r = c.api("task_update", {"id": t["id"], "patch": {"subs": bad}})
+        check(f"subs that is not a list of subtasks refused: {bad!r}", status == 400, str(r))
+    c.api("task_update", {"id": t["id"], "patch": {"subs": subs_in}})
+    status, r = c.api("task_update", {"id": t["id"], "patch": {"dur": 45}})
+    check("an unrelated change keeps notes and subtasks", status == 200 and r["task"]["dur"] == 45
+          and r["task"]["notes"] == "é" * 5000 and len(r["task"]["subs"]) == 2, str(r)[:200])
+    _, st = c.api("state", day=today)
+    got = next(x for x in st["tasks"] if x["id"] == t["id"])
+    check("state shows the saved notes and subtasks", got["notes"] == "é" * 5000
+          and [s["title"] for s in got["subs"]] == ["Buy paint", "Sand"])
+    c.api("task_update", {"id": t["id"], "patch": {"notes": ""}})
+    c.api("task_update", {"id": t["id"], "patch": {"subs": []}})
+
+    # two tasks planned at the same time are allowed
+    ids = []
+    for name in ("Twin A", "Twin B"):
+        _, r = c.api("task_add", {"title": name})
+        ids.append(r["task"]["id"])
+        status, r = c.api("task_update", {"id": r["task"]["id"], "patch": {"where": "also", "day": today, "start": 900, "dur": 30}})
+    _, st = c.api("state", day=today)
+    twins = [x for x in st["tasks"] if x["id"] in ids]
+    check("two tasks can share a start time on the same day", len(twins) == 2 and all(x["start"] == 900 for x in twins))
+    for i in ids:
+        c.api("task_delete", {"id": i})
 
     # --- rollover ---
     _, r2 = c.api("task_add", {"title": "Old unfinished"})
@@ -265,6 +313,27 @@ def run(site):
     check("old password no longer works", not fresh.login("alex", "correct horse battery")[0])
     check("new password works", fresh.login("alex", "a-much-longer-password")[0])
 
+    # --- the board page: theme and the password form ---
+    page_c = Client()
+    page_c.login("alex", "a-much-longer-password")
+    sess = "; ".join(f"{k.name}={k.value}" for k in page_c.jar)
+
+    def themed(val):
+        return page_c.raw("/", headers={"Cookie": sess + ("; planner_theme=" + val if val else "")})[1]
+    html = themed("")
+    check("this is the signed-in board", "app.js" in html)
+    check("board page is dark by default", re.search(r'<html[^>]*data-theme="dark"', html) is not None)
+    html = themed("light")
+    check("cookie planner_theme=light gives the light theme", re.search(r'<html[^>]*data-theme="light"', html) is not None)
+    for val in ("dark", "blue", "LIGHT", '"><script>'.replace('"', "%22")):
+        html = themed(val)
+        check(f"any other theme cookie ({val}) gives dark", re.search(r'<html[^>]*data-theme="dark"', html) is not None)
+    form = re.search(r'<form[^>]*id="pw-form".*?</form>', html, re.S)
+    check("password boxes sit in #pw-form with a user name input", form is not None and 'id="pw-cur"' in form.group(0)
+          and 'id="pw-new"' in form.group(0) and 'autocomplete="username"' in form.group(0))
+    forms = re.findall(r'<form.*?</form>', html, re.S)
+    check("the brain dump input is in no form", 'id="new"' in html and not any('id="new"' in f for f in forms))
+
     # --- logout and lockout ---
     c.api("logout", {})
     status, _ = c.api("state", day=today)
@@ -334,6 +403,76 @@ def run_local(work):
         check("local mode: the app's own files are served", status == 200)
         status, body, _ = c.raw("/assets/app.js", headers={"Host": "planner.example.com"})
         check("local mode: not even those under another host name", status == 403)
+    finally:
+        php.terminate()
+
+
+def run_migration(work):
+    """A database made by version 1 (no notes, no subtasks, old starter colors) is upgraded in place."""
+    today = date.today().isoformat()
+    site = work / "migrate"
+    shutil.copytree(ROOT / "public", site, ignore=shutil.ignore_patterns("planner.sqlite*", "sessions", "config.php", "server.log"))
+    (site / "data" / "config.php").write_text(
+        "<?php return ['env'=>'local','bridge_key'=>'" + "k" * 64 + "','local_key'=>'" + "M" * 64 + "'];",
+        encoding="utf-8")
+    dbfile = site / "data" / "planner.sqlite"
+    con = sqlite3.connect(dbfile)
+    con.executescript("""
+        CREATE TABLE settings (k TEXT PRIMARY KEY, v TEXT NOT NULL);
+        CREATE TABLE projects (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, color TEXT NOT NULL,
+            sort INTEGER NOT NULL DEFAULT 0);
+        CREATE TABLE tasks (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL,
+            project_id INTEGER REFERENCES projects(id) ON DELETE SET NULL,
+            dur INTEGER NOT NULL DEFAULT 30,
+            place TEXT NOT NULL DEFAULT 'dump',
+            slot INTEGER, day TEXT, start INTEGER,
+            done INTEGER NOT NULL DEFAULT 0, done_at TEXT,
+            carried INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL);
+        CREATE INDEX tasks_day ON tasks(day);
+        CREATE TABLE attempts (ip TEXT NOT NULL, ts INTEGER NOT NULL);
+        CREATE INDEX attempts_ts ON attempts(ts);
+        CREATE TABLE cal_cache (day TEXT PRIMARY KEY, json TEXT NOT NULL, fetched_at INTEGER NOT NULL);
+        INSERT INTO projects (name, color, sort) VALUES
+            ('Work', '#e9967a', 1), ('Personal', '#7fb7be', 2), ('Learning', '#9d8fd6', 3), ('Admin', '#b9b3a7', 4);
+        UPDATE projects SET color = '#123456' WHERE name = 'Personal';
+        INSERT INTO tasks (title, project_id, dur, place, day, start, created_at)
+            VALUES ('Old task', 1, 45, 'also', '%s', 600, '2026-01-01 00:00:00');
+        PRAGMA user_version = 1;
+    """ % today)
+    con.commit()
+    con.close()
+    php = subprocess.Popen(["php", "-S", f"127.0.0.1:{MIGRATE_PORT}", "-t", str(site), str(ROOT / "tools" / "router.php")],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        c = Client()
+        c.base = f"http://127.0.0.1:{MIGRATE_PORT}"
+        for _ in range(50):
+            try:
+                urllib.request.urlopen(c.base + "/", timeout=1)
+                break
+            except Exception:
+                time.sleep(0.1)
+        _, html, _ = c.raw("/?k=" + "M" * 64)
+        c.csrf = re.search(r'name="csrf" content="([0-9a-f]+)"', html).group(1)
+        status, st = c.api("state", day=today)
+        check("migration: the old database still answers", status == 200, str(st)[:200])
+        old = [x for x in st.get("tasks", []) if x["title"] == "Old task"]
+        check("migration: the old task is still there, with empty notes and subtasks",
+              len(old) == 1 and old[0]["notes"] == "" and old[0]["subs"] == [] and old[0]["dur"] == 45
+              and old[0]["start"] == 600, str(old))
+        colors = {p["name"]: p["color"] for p in st.get("projects", [])}
+        check("migration: untouched starter colors become the brighter ones", colors.get("Work") == "#ff7a59"
+              and colors.get("Learning") == "#a78bfa" and colors.get("Admin") == "#ffc83d", str(colors))
+        check("migration: a hand-picked color is kept", colors.get("Personal") == "#123456", str(colors))
+        status, r = c.api("task_update", {"id": old[0]["id"], "patch": {"notes": "hi", "subs": [{"title": "a", "done": False}]}})
+        check("migration: notes and subtasks can be saved on the old task", status == 200 and r["task"]["notes"] == "hi"
+              and len(r["task"]["subs"]) == 1, str(r))
+        con = sqlite3.connect(dbfile)
+        version = con.execute("PRAGMA user_version").fetchone()[0]
+        con.close()
+        check("migration: the database is now version 2", version == 2, str(version))
     finally:
         php.terminate()
 
