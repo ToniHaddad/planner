@@ -1,0 +1,235 @@
+"""Publish the planner to a Hostinger web hosting plan through the Hostinger API.
+
+    python tools/deploy.py                  upload the app; the first run also creates the
+                                            subdomain, its SSL certificate and the login
+    python tools/deploy.py --reset-password make a new password (signs out every device)
+
+Settings come from deploy.local.json beside this repo's README (git-ignored), or from the
+environment variables in brackets:
+
+    {
+      "hostinger_username": "u123456789",       [PLANNER_HOSTINGER_USERNAME]  hosting account, as hPanel shows it
+      "domain": "planner.example.com",          [PLANNER_DOMAIN]              a subdomain of a site on that plan
+      "login_name": "alex"                      [PLANNER_LOGIN_NAME]          the name you will sign in with
+    }
+
+Also needs HOSTINGER_API_TOKEN in the environment and php on PATH (to hash the password).
+On any other host, use tools/make-config.php and upload public/ yourself: see docs/hosting.md.
+
+Secrets: the server's config (password hash, calendar key) is generated here and uploaded
+to data/config.php, which is never served and never in git. The password itself is
+written once to ~/.planner/credentials.txt on this machine and nowhere else.
+Runtime data (data/planner.sqlite, sessions) lives only on the server and is never
+touched by a deploy.
+"""
+import argparse
+import json
+import os
+import secrets
+import string
+import subprocess
+import sys
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+from pathlib import Path
+
+API = "https://developers.hostinger.com/api/hosting/v1"
+ROOT = Path(__file__).resolve().parent.parent
+PUBLIC = ROOT / "public"
+CRED_FILE = Path.home() / ".planner" / "credentials.txt"
+SETTINGS_FILE = ROOT / "deploy.local.json"
+
+
+def load_settings():
+    """Where to publish: deploy.local.json, with environment variables taking priority."""
+    data = {}
+    if SETTINGS_FILE.is_file():
+        try:
+            data = json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
+        except ValueError as e:
+            sys.exit(f"{SETTINGS_FILE.name} is not valid JSON: {e}")
+    out = {}
+    for key in ("hostinger_username", "domain", "login_name"):
+        value = os.environ.get("PLANNER_" + key.upper()) or data.get(key) or ""
+        if not value:
+            sys.exit(f"Missing \"{key}\". Put it in {SETTINGS_FILE.name} or set PLANNER_{key.upper()}. "
+                     "See the top of tools/deploy.py.")
+        out[key] = str(value).strip()
+    if out["domain"].count(".") < 2:
+        sys.exit("\"domain\" must be a subdomain, such as planner.example.com")
+    return out
+
+
+_settings = load_settings() if __name__ == "__main__" and not {"-h", "--help"} & set(sys.argv) else {"hostinger_username": "", "domain": ".", "login_name": ""}
+USERNAME = _settings["hostinger_username"]
+DOMAIN = _settings["domain"]
+SUB, PARENT = DOMAIN.split(".", 1)
+LOGIN_NAME = _settings["login_name"]
+
+
+def call(method, url, headers=None, data=None, ok=(200, 201, 202, 204)):
+    # Hostinger's API answers 403 to Python's default user agent.
+    headers = {"User-Agent": "planner-deploy/1.0", "Accept": "application/json", **(headers or {})}
+    req = urllib.request.Request(url, data=data, method=method, headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=90) as r:
+            return r.status, {k.lower(): v for k, v in r.headers.items()}, r.read()
+    except urllib.error.HTTPError as e:
+        body = e.read()
+        if e.code in ok:
+            return e.code, {k.lower(): v for k, v in e.headers.items()}, body
+        return e.code, {k.lower(): v for k, v in e.headers.items()}, body
+
+
+def api(method, path, token, payload=None):
+    headers = {"Authorization": f"Bearer {token}"}
+    data = None
+    if payload is not None:
+        headers["Content-Type"] = "application/json"
+        data = json.dumps(payload).encode()
+    status, hdrs, body = call(method, API + path, headers, data)
+    try:
+        parsed = json.loads(body) if body else None
+    except ValueError:
+        parsed = body.decode("utf-8", "replace")
+    return status, hdrs, parsed
+
+
+def new_password():
+    alphabet = string.ascii_letters + string.digits
+    return "-".join("".join(secrets.choice(alphabet) for _ in range(6)) for _ in range(4))
+
+
+def hash_password(password):
+    code = 'echo password_hash(trim(stream_get_contents(STDIN)), PASSWORD_BCRYPT, ["cost" => 12]);'
+    out = subprocess.run(["php", "-r", code], input=password.encode(), capture_output=True, check=True)
+    hashed = out.stdout.decode().strip()
+    if not hashed.startswith("$2y$"):
+        sys.exit("php did not return a bcrypt hash")
+    return hashed
+
+
+def php_string(value):
+    return "'" + value.replace("\\", "\\\\").replace("'", "\\'") + "'"
+
+
+def build_config(password_hash, bridge_key):
+    return (
+        "<?php\n// Generated by tools/deploy.py. Never commit, never share.\nreturn [\n"
+        "    'env' => 'prod',\n"
+        f"    'username' => {php_string(LOGIN_NAME)},\n"
+        f"    'password_hash' => {php_string(password_hash)},\n"
+        f"    'cred_version' => {int(time.time())},\n"
+        f"    'bridge_key' => {php_string(bridge_key)},\n"
+        "];\n"
+    ).encode()
+
+
+def save_credentials(password):
+    CRED_FILE.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    CRED_FILE.write_text(
+        f"Planner login\nAddress:  https://{DOMAIN}\nUsername: {LOGIN_NAME}\nPassword: {password}\n"
+        "Change it any time in the planner: Settings > Password.\n", encoding="utf-8")
+    os.chmod(CRED_FILE, 0o600)
+    print(f"Login written to {CRED_FILE}")
+
+
+def ensure_subdomain(token):
+    status, _, sites = api("GET", "/websites?per_page=100", token)
+    if status != 200:
+        sys.exit(f"Could not list websites ({status}): {sites}")
+    if any(s.get("domain") == DOMAIN for s in sites.get("data", [])):
+        return False
+    status, _, body = api("POST", f"/accounts/{USERNAME}/websites/{PARENT}/subdomains", token, {"subdomain": SUB})
+    if status not in (200, 201, 202, 204):
+        sys.exit(f"Could not create {DOMAIN} ({status}): {body}")
+    print(f"Created {DOMAIN}")
+    return True
+
+
+def upload_session(token):
+    for _ in range(20):
+        status, hdrs, creds = api("POST", "/files/upload-urls", token, {"username": USERNAME, "domain": DOMAIN})
+        if status == 200 and isinstance(creds, dict) and "url" in creds:
+            return creds
+        if status == 409:
+            wait = int(hdrs.get("retry-after", "10"))
+            print(f"Website still being set up, waiting {wait}s")
+            time.sleep(min(wait, 30))
+            continue
+        sys.exit(f"Could not get an upload address ({status}): {creds}")
+    sys.exit("The website setup did not finish in time")
+
+
+def upload(creds, rel, data):
+    base = creds["url"].rstrip("/")
+    auth = {"X-Auth": creds["auth_key"], "X-Auth-Rest": creds["rest_auth_key"], "Tus-Resumable": "1.0.0"}
+    target = f"{base}/{urllib.parse.quote(rel)}?override=true"
+    s1, _, _ = call("POST", target, {**auth, "Upload-Length": str(len(data)), "Upload-Offset": "0"})
+    s2, h, _ = call("PATCH", target, {**auth, "Upload-Offset": "0",
+                                      "Content-Type": "application/offset+octet-stream"}, data)
+    return s1 == 201 and s2 == 204 and h.get("upload-offset") == str(len(data))
+
+
+def remote_has_config(token):
+    q = urllib.parse.urlencode({"directory": "data", "max_depth": 1})
+    status, _, body = api("GET", f"/accounts/{USERNAME}/domains/{DOMAIN}/files?{q}", token)
+    return status == 200 and "config.php" in json.dumps(body)
+
+
+def app_files():
+    for path in sorted(PUBLIC.rglob("*")):
+        if not path.is_file():
+            continue
+        rel = path.relative_to(PUBLIC).as_posix()
+        if rel.startswith("data/") and rel != "data/.htaccess":
+            continue          # config, database and sessions are never uploaded from here
+        yield rel, path.read_bytes()
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Publish the planner to Hostinger. Settings: see the top of this file.")
+    parser.add_argument("--reset-password", action="store_true")
+    args = parser.parse_args()
+    token = os.environ.get("HOSTINGER_API_TOKEN")
+    if not token:
+        sys.exit("HOSTINGER_API_TOKEN is not set")
+
+    created = ensure_subdomain(token)
+    creds = upload_session(token)
+    failed = 0
+    for rel, data in app_files():
+        ok = upload(creds, rel, data)
+        failed += not ok
+        print(f"{'OK ' if ok else 'BAD'} {rel} ({len(data)} bytes)")
+
+    first_time = not remote_has_config(token)
+    if first_time or args.reset_password:
+        password = new_password()
+        if first_time:
+            bridge_key = secrets.token_urlsafe(48)
+        else:
+            # Keep the calendar key so a connected calendar keeps working.
+            q = urllib.parse.urlencode({"path": "data/config.php"})
+            status, _, body = api("GET", f"/accounts/{USERNAME}/domains/{DOMAIN}/files/content?{q}", token)
+            text = json.dumps(body)
+            marker = "'bridge_key' => '"
+            if status != 200 or marker not in text:
+                sys.exit("Could not read the current calendar key; nothing was changed")
+            bridge_key = text.split(marker, 1)[1].split("'", 1)[0]
+        if upload(creds, "data/config.php", build_config(hash_password(password), bridge_key)):
+            save_credentials(password)
+        else:
+            failed += 1
+            print("BAD data/config.php")
+
+    if created:
+        status, _, body = api("POST", f"/accounts/{USERNAME}/websites/{DOMAIN}/ssl/setup", token)
+        print(f"SSL requested ({status})")
+    sys.exit(1 if failed else 0)
+
+
+if __name__ == "__main__":
+    main()

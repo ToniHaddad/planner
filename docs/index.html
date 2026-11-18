@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Planner: plan your day on one page</title>
+<meta name="description" content="A free, open-source day planner that runs on your own computer. Empty your head, pick three things that matter, and fit them around your Google Calendar.">
+<meta name="color-scheme" content="light dark">
+<meta property="og:title" content="Planner: plan your day on one page">
+<meta property="og:description" content="Empty your head, pick three things that matter, fit them around your calendar. Free, open source, runs on your own computer.">
+<meta property="og:image" content="https://tonihaddad.github.io/planner/img/board-light.png">
+<meta property="og:type" content="website">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<style>
+:root{
+  --bg:#f6f3ee;--card:#fffdf9;--ink:#2b2a27;--soft:#6f6a60;--line:#e7e1d6;
+  --accent:#2f5d50;--accent-soft:#e3eee9;--go:#2f5d50;--code:#efebe3;
+  --work:#e9967a;--personal:#7fb7be;--learning:#9d8fd6;
+  --shadow:0 24px 70px rgba(60,50,30,.16);
+}
+@media (prefers-color-scheme:dark){
+  :root{
+    --bg:#1b1a18;--card:#242321;--ink:#ece8e0;--soft:#a39d92;--line:#383631;
+    --accent:#8fd0b9;--accent-soft:#25372f;--go:#3a7a67;--code:#2c2b28;
+    --shadow:0 24px 70px rgba(0,0,0,.5);
+  }
+}
+*{box-sizing:border-box}
+html{scroll-behavior:smooth}
+body{margin:0;background:var(--bg);color:var(--ink);font:17px/1.55 "Segoe UI",system-ui,-apple-system,sans-serif;-webkit-font-smoothing:antialiased}
+a{color:var(--accent)}
+img{max-width:100%;height:auto;display:block}
+.wrap{max-width:1120px;margin:0 auto;padding:0 22px}
+nav{display:flex;align-items:center;gap:22px;padding:20px 0}
+nav .brand{display:flex;align-items:center;gap:10px;font-weight:700;font-size:18px;color:var(--ink);text-decoration:none;margin-right:auto}
+nav .brand img{width:30px;height:30px}
+nav a{color:var(--soft);text-decoration:none;font-size:15px;font-weight:600}
+nav a:hover{color:var(--ink)}
+.hero{text-align:center;padding:54px 0 0}
+.hero h1{font-size:clamp(36px,6vw,62px);line-height:1.06;letter-spacing:-.025em;margin:0 auto 18px;max-width:15ch;font-weight:750}
+.hero h1 em{font-style:normal;color:var(--accent)}
+.hero p{font-size:clamp(17px,2.1vw,20px);color:var(--soft);max-width:54ch;margin:0 auto 28px}
+.cta{display:flex;gap:12px;justify-content:center;flex-wrap:wrap}
+.btn{display:inline-block;border:1px solid var(--line);background:var(--card);color:var(--ink);border-radius:12px;padding:12px 20px;font-weight:650;text-decoration:none}
+.btn:hover{filter:brightness(1.05)}
+.btn.go{background:var(--go);border-color:var(--go);color:#fff}
+.tags{color:var(--soft);font-size:14px;margin-top:16px}
+.shot{margin:46px auto 0;border-radius:18px;border:1px solid var(--line);box-shadow:var(--shadow);overflow:hidden;background:var(--card)}
+section{padding:84px 0 0}
+h2{font-size:clamp(26px,3.4vw,36px);letter-spacing:-.02em;line-height:1.15;margin:0 0 10px}
+.lead{color:var(--soft);max-width:60ch;margin:0 0 32px}
+.center{text-align:center}
+.center .lead{margin-left:auto;margin-right:auto}
+.grid3{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:18px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:24px}
+.card h3{margin:0 0 6px;font-size:19px}
+.card p{margin:0;color:var(--soft);font-size:16px}
+.num{width:36px;height:36px;border-radius:50%;display:grid;place-items:center;font-weight:750;color:#2b2a27;margin-bottom:14px}
+.n1{background:var(--work)}.n2{background:var(--personal)}.n3{background:var(--learning)}
+.feat{display:grid;grid-template-columns:repeat(2,1fr);gap:14px 40px;margin:0;padding:0;list-style:none}
+.feat li{padding-left:30px;position:relative}
+.feat li:before{content:"✓";position:absolute;left:0;top:0;color:var(--accent);font-weight:800}
+.feat b{display:block}
+.feat span{color:var(--soft);font-size:16px}
+.split{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:44px;align-items:center}
+.split .shot{margin:0}
+.os{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:18px;text-align:left}
+.os .card{min-width:0}
+.os .card h3{font-size:17px}
+pre{background:var(--code);border-radius:10px;padding:12px 14px;margin:12px 0 0;overflow-x:auto;font:14px/1.5 Consolas,Menlo,monospace}
+code{font:14px/1.5 Consolas,Menlo,monospace;background:var(--code);border-radius:5px;padding:1px 5px}
+pre code{background:none;padding:0}
+ol.steps{margin:0;padding-left:20px;color:var(--soft)}
+ol.steps li{margin-bottom:8px}
+ol.steps b{color:var(--ink)}
+.note{background:var(--accent-soft);border-radius:16px;padding:22px 24px;margin-top:22px}
+.note p{margin:0}
+footer{margin-top:90px;border-top:1px solid var(--line);padding:28px 0 46px;color:var(--soft);font-size:15px;display:flex;gap:20px;flex-wrap:wrap}
+footer span{margin-right:auto}
+@media(max-width:820px){
+  .grid3,.os,.feat,.split{grid-template-columns:minmax(0,1fr)}
+  nav a.hide{display:none}
+  section{padding-top:60px}
+  .hero{padding-top:30px}
+}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <nav>
+    <a class="brand" href="./"><img src="icon.svg" alt="">Planner</a>
+    <a class="hide" href="#how">How it works</a>
+    <a class="hide" href="#run">Run it</a>
+    <a class="hide" href="#calendar">Calendar</a>
+    <a href="https://github.com/ToniHaddad/planner">GitHub</a>
+  </nav>
+
+  <header class="hero">
+    <h1>Plan the day you <em>really</em> have.</h1>
+    <p>Empty your head, pick the three things that matter, and fit them around your calendar. One page, on your own computer.</p>
+    <div class="cta">
+      <a class="btn go" href="#run">Run it on your computer</a>
+      <a class="btn" href="https://github.com/ToniHaddad/planner">View the source</a>
+    </div>
+    <p class="tags">Free and open source · No account · No tracking</p>
+    <div class="shot">
+      <picture>
+        <source media="(prefers-color-scheme: dark)" srcset="img/board-dark.png">
+        <img src="img/board-light.png" width="2640" height="1720" alt="The planner board: a brain dump list on the left, three main tasks in the middle, and the day's timeline on the right with calendar events shown as locked, striped blocks">
+      </picture>
+    </div>
+  </header>
+
+  <section id="how" class="center">
+    <h2>Three moves, left to right</h2>
+    <p class="lead">The board is the method. There is nothing else to learn.</p>
+    <div class="grid3" style="text-align:left">
+      <div class="card"><div class="num n1">1</div><h3>Brain dump</h3><p>Type everything on your mind and press Enter. Don't sort, don't schedule. Just get it out of your head.</p></div>
+      <div class="card"><div class="num n2">2</div><h3>Today's 3</h3><p>Drag in the three tasks that would make the day a good one. Smaller things go to "Also today".</p></div>
+      <div class="card"><div class="num n3">3</div><h3>Timebox</h3><p>Drag tasks onto the timeline. Meetings from your calendar are locked blocks, so the plan fits the time you have.</p></div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Small on purpose</h2>
+    <p class="lead">A planner should take a minute in the morning, not become another project to manage.</p>
+    <ul class="feat">
+      <li><b>Your calendar on the timeline</b><span>Google Calendar events show as striped blocks you can't plan over. The header tells you how much of the day is still free.</span></li>
+      <li><b>Time blocks back to your calendar</b><span>One button writes the day's plan to a separate "Planner" calendar. Send it again and it replaces, never duplicates.</span></li>
+      <li><b>Nothing gets lost</b><span>What you didn't finish returns to the brain dump the next day, marked "carried".</span></li>
+      <li><b>Projects in color</b><span>Give each project a color and see at a glance where the day is going.</span></li>
+      <li><b>Drag, drop, resize, undo</b><span>Blocks snap to 15 minutes. Pull the bottom edge to change the length. Deleted by mistake? Undo.</span></li>
+      <li><b>Light and dark</b><span>Follows your system.</span></li>
+      <li><b>Your data stays with you</b><span>Tasks live in one file on your machine. No analytics, nothing loaded from other sites.</span></li>
+      <li><b>Nothing to maintain</b><span>Plain PHP and plain JavaScript. No frameworks, no build step, no database server.</span></li>
+    </ul>
+  </section>
+
+  <section id="run" class="center">
+    <h2>Run it on your computer</h2>
+    <p class="lead">You need PHP, and nothing else. The planner opens in your browser, with no sign-up and no sign-in.</p>
+    <div class="os">
+      <div class="card">
+        <h3>Windows</h3>
+        <p><a href="https://github.com/ToniHaddad/planner/archive/refs/heads/main.zip">Download the ZIP</a>, unzip it, and double-click <code>start.bat</code>. If PHP is missing, it offers to install it for you.</p>
+      </div>
+      <div class="card">
+        <h3>macOS</h3>
+        <pre><code>brew install php
+git clone https://github.com/ToniHaddad/planner
+cd planner
+./start.sh</code></pre>
+      </div>
+      <div class="card">
+        <h3>Linux</h3>
+        <pre><code>sudo apt install php-cli php-sqlite3 \
+  php-curl php-mbstring
+git clone https://github.com/ToniHaddad/planner
+cd planner
+./start.sh</code></pre>
+      </div>
+    </div>
+    <div class="note" style="text-align:left">
+      <p><b>Work on more than one computer?</b> Put the same app on any web host that runs PHP, behind a username and password, and open it from anywhere. <a href="https://github.com/ToniHaddad/planner/blob/main/docs/hosting.md">Hosting guide</a></p>
+    </div>
+  </section>
+
+  <section id="calendar">
+    <div class="split">
+      <div>
+        <h2>Connect Google Calendar in three minutes</h2>
+        <p class="lead">The planner walks you through it, step by step. It never sees your Google password.</p>
+        <ol class="steps">
+          <li><b>Copy</b> a small script from the planner's settings.</li>
+          <li><b>Paste</b> it into your own Google account, in Google Apps Script.</li>
+          <li><b>Deploy</b> it and allow it to read your calendar.</li>
+          <li><b>Paste</b> the address Google gives you back into the planner.</li>
+        </ol>
+        <p style="margin-top:18px"><a href="https://github.com/ToniHaddad/planner/blob/main/docs/google-calendar.md">Read the full walkthrough</a></p>
+        <div class="note">
+          <p><b>Outlook, iCloud or something else?</b> Calendars you subscribe to inside Google Calendar already show up. For a direct connection to another calendar, <a href="https://github.com/ToniHaddad/planner/issues/new">contact me</a> and tell me what you use.</p>
+        </div>
+      </div>
+      <div class="shot"><img src="img/calendar-setup.png" width="1360" height="1584" loading="lazy" alt="The planner's settings window, showing five numbered steps to connect Google Calendar"></div>
+    </div>
+  </section>
+
+  <footer>
+    <span>Planner · MIT license</span>
+    <a href="https://github.com/ToniHaddad/planner">Source on GitHub</a>
+    <a href="https://github.com/ToniHaddad/planner/issues/new">Contact</a>
+  </footer>
+</div>
+</body>
+</html>

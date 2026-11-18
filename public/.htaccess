@@ -1,0 +1,7 @@
+Options -Indexes
+RewriteEngine On
+# data and lib are never served
+RewriteRule ^(data|lib)(/|$) - [F,L]
+<FilesMatch "\.(sqlite|sqlite-wal|sqlite-shm|db|gs|md|py|log)$">
+  Require all denied
+</FilesMatch>

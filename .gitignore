@@ -1,0 +1,10 @@
+# runtime data and secrets never go to git
+public/data/*
+!public/data/.htaccess
+config.php
+deploy.local.json
+CLAUDE.local.md
+.superpowers/
+skill-observations/
+__pycache__/
+*.gsheet

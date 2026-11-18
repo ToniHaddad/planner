@@ -1,0 +1,137 @@
+/**
+ * Planner calendar bridge. Runs in YOUR Google account as an Apps Script web app,
+ * so the planner can read your day and write your time blocks without any password
+ * leaving Google. Only requests carrying the secret key below are answered.
+ *
+ * Reads: every calendar you have ticked in Google Calendar (including subscribed
+ * ones such as Outlook), except the Planner calendar itself.
+ * Writes: only events it created itself, inside a calendar named "Planner".
+ */
+const KEY = '__BRIDGE_KEY__';
+const PLANNER_CAL = 'Planner';
+const TAG = 'planner';
+const TAG_VALUE = 'timebox';
+const EVENT_COLORS = [['1', '#a4bdfc'], ['2', '#7ae7bf'], ['3', '#dbadff'], ['4', '#ff887c'], ['5', '#fbd75b'],
+  ['6', '#ffb878'], ['7', '#46d6db'], ['8', '#e1e1e1'], ['9', '#5484ed'], ['10', '#51b749'], ['11', '#dc2127']];
+
+/** Run this once from the editor to grant calendar access. */
+function authorize() {
+  return CalendarApp.getDefaultCalendar().getName();
+}
+
+function doGet(e) {
+  const p = (e && e.parameter) || {};
+  if (!keyOk_(p.key)) return out_({ error: 'forbidden' });
+  try {
+    if (p.action === 'ping') return out_(ping_());
+    if (p.action === 'events') return out_(events_(p.date));
+    return out_({ error: 'unknown action' });
+  } catch (err) {
+    return out_({ error: String((err && err.message) || err) });
+  }
+}
+
+function doPost(e) {
+  let body = {};
+  try { body = JSON.parse(e.postData.contents); } catch (err) { body = {}; }
+  if (!keyOk_(body.key)) return out_({ error: 'forbidden' });
+  try {
+    if (body.action === 'push') return out_(push_(body.date, body.blocks || []));
+    return out_({ error: 'unknown action' });
+  } catch (err) {
+    return out_({ error: String((err && err.message) || err) });
+  }
+}
+
+function keyOk_(given) {
+  if (typeof given !== 'string' || given.length !== KEY.length || KEY.length < 32) return false;
+  let diff = 0;
+  for (let i = 0; i < KEY.length; i++) diff |= KEY.charCodeAt(i) ^ given.charCodeAt(i);
+  return diff === 0;
+}
+
+function out_(obj) {
+  return ContentService.createTextOutput(JSON.stringify(obj)).setMimeType(ContentService.MimeType.JSON);
+}
+
+function tz_() {
+  return CalendarApp.getDefaultCalendar().getTimeZone();
+}
+
+/** Midnight at the start of the date and of the next day, in the calendar's time zone. */
+function dayBounds_(date) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(String(date))) throw new Error('bad date');
+  const tz = tz_();
+  const start = Utilities.parseDate(date + ' 00:00', tz, 'yyyy-MM-dd HH:mm');
+  const nextDay = Utilities.formatDate(new Date(start.getTime() + 36 * 3600000), tz, 'yyyy-MM-dd');
+  const end = Utilities.parseDate(nextDay + ' 00:00', tz, 'yyyy-MM-dd HH:mm');
+  return { tz: tz, start: start, end: end };
+}
+
+function readCalendars_() {
+  return CalendarApp.getAllCalendars().filter(function (c) {
+    return c.isSelected() && !c.isHidden() && c.getName() !== PLANNER_CAL;
+  });
+}
+
+function ping_() {
+  return { ok: true, tz: tz_(), calendars: readCalendars_().map(function (c) { return c.getName(); }) };
+}
+
+function events_(date) {
+  const b = dayBounds_(date);
+  const events = [], allDay = [];
+  readCalendars_().forEach(function (cal) {
+    const name = cal.getName(), color = cal.getColor();
+    cal.getEvents(b.start, b.end).forEach(function (ev) {
+      try { if (ev.getMyStatus() === CalendarApp.GuestStatus.NO) return; } catch (err) { /* not a guest */ }
+      const title = ev.getTitle() || '(busy)';
+      if (ev.isAllDayEvent()) { allDay.push({ title: title, calendar: name, color: color }); return; }
+      const s = Math.max(0, Math.round((ev.getStartTime().getTime() - b.start.getTime()) / 60000));
+      const e = Math.min(1440, Math.round((ev.getEndTime().getTime() - b.start.getTime()) / 60000));
+      if (e > s) events.push({ title: title, start: s, end: e, calendar: name, color: color });
+    });
+  });
+  events.sort(function (x, y) { return x.start - y.start; });
+  return { ok: true, tz: b.tz, date: date, events: events, allDay: allDay };
+}
+
+function nearestColor_(hex) {
+  const rgb = function (h) {
+    const m = /^#?([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(h || '');
+    return m ? [parseInt(m[1], 16), parseInt(m[2], 16), parseInt(m[3], 16)] : null;
+  };
+  const a = rgb(hex);
+  if (!a) return null;
+  let best = null, bestD = Infinity;
+  EVENT_COLORS.forEach(function (ec) {
+    const c = rgb(ec[1]);
+    const d = Math.pow(a[0] - c[0], 2) + Math.pow(a[1] - c[1], 2) + Math.pow(a[2] - c[2], 2);
+    if (d < bestD) { bestD = d; best = ec[0]; }
+  });
+  return best;
+}
+
+/** Replaces the planner's own blocks on that date. Safe to run again: no duplicates. */
+function push_(date, blocks) {
+  const b = dayBounds_(date);
+  const found = CalendarApp.getCalendarsByName(PLANNER_CAL);
+  const cal = found.length ? found[0] : CalendarApp.createCalendar(PLANNER_CAL, { timeZone: b.tz });
+  let removed = 0, created = 0;
+  cal.getEvents(b.start, b.end).forEach(function (ev) {
+    if (ev.getTag(TAG) === TAG_VALUE && ev.getStartTime().getTime() >= b.start.getTime()) { ev.deleteEvent(); removed++; }
+  });
+  blocks.slice(0, 60).forEach(function (blk) {
+    const startMin = Number(blk.start), dur = Number(blk.dur);
+    if (!(startMin >= 0 && startMin < 1440 && dur > 0 && dur <= 1440)) return;
+    const hh = ('0' + Math.floor(startMin / 60)).slice(-2), mm = ('0' + (startMin % 60)).slice(-2);
+    const start = Utilities.parseDate(date + ' ' + hh + ':' + mm, b.tz, 'yyyy-MM-dd HH:mm');
+    const ev = cal.createEvent(String(blk.title || 'Block').slice(0, 200), start,
+      new Date(start.getTime() + dur * 60000), { description: 'Created by Planner' });
+    ev.setTag(TAG, TAG_VALUE);
+    const color = nearestColor_(blk.color);
+    if (color) { try { ev.setColor(color); } catch (err) { /* color is optional */ } }
+    created++;
+  });
+  return { ok: true, created: created, removed: removed };
+}
