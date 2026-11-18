@@ -57,6 +57,9 @@ machine paths. Private notes for the owner's own deployment live in `CLAUDE.loca
 - **Hosted security:** bcrypt password, per-address lockout (8 wrong tries / 15 min, counted atomically),
   `SameSite=Strict` HttpOnly Secure session cookie, CSRF header on every change, strict CSP (no inline scripts,
   so the front end uses `data-act` attributes instead of `onclick`).
+- **Dragging:** a mouse uses HTML5 drag and drop; a finger uses the touch handlers in `app.js` (press and hold
+  260 ms, then move; the page scrolls when the finger is near an edge). Both call `dragMove()` and `dragDrop()`.
+  Nothing may re-render the board while a touch drag is active: a touch only reports to the element it started on.
 - **Front end:** a delete is sent at once; "Undo" adds the task again (`restoreTask`), without its slot or time
   if those were taken meanwhile. Colors are CSS variables with a `prefers-color-scheme: dark` set.
 

@@ -109,7 +109,7 @@ If you need a direct connection to another calendar, or something else the plann
 | Day hours | Settings: choose when your day starts and ends |
 | Put the plan in your calendar | **Send to calendar** (appears once a calendar is connected) |
 
-Dragging needs a mouse or trackpad. On a phone you can add tasks, tick them off and read your day, but not drag.
+On a phone or tablet, press and hold a task for a moment, then drag it. Holding it near the top or bottom edge scrolls the page, so you can carry a task from the brain dump down to the timeline.
 
 ## Use it from several computers
 

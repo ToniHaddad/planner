@@ -418,7 +418,10 @@ document.addEventListener('change', e => {
 });
 
 // ---------- drag and drop ----------
+// A mouse uses the browser's own drag and drop. A finger uses the touch handlers further
+// down (press and hold, then move). Both end up in dragMove() and dragDrop().
 document.addEventListener('dragstart', e => {
+  if (touch) { e.preventDefault(); return; }     // a finger is already dragging its own way
   const el = e.target.closest && e.target.closest('[data-id][draggable="true"]');
   if (!el) return;
   const off = el.dataset.blk ? Math.round((e.clientY - el.getBoundingClientRect().top) / H * 60) : 0;
@@ -429,45 +432,44 @@ document.addEventListener('dragstart', e => {
 });
 document.addEventListener('dragend', () => { drag = null; render(); });
 
-function dropTime(e) {
+function dropTime(y) {
   const t = task(drag.id), r = $('tl').getBoundingClientRect();
-  const m = Math.round((startMin() + (e.clientY - r.top) / H * 60 - drag.off) / SNAP) * SNAP;
+  const m = Math.round((startMin() + (y - r.top) / H * 60 - drag.off) / SNAP) * SNAP;
   return Math.max(startMin(), Math.min(endMin() - t.dur, m));
 }
 
-document.addEventListener('dragover', e => {
-  if (!drag || !task(drag.id)) return;
+/** Shows where the dragged task would land. Returns true when `target` can take it. */
+function dragMove(target, y) {
   document.querySelectorAll('.over').forEach(x => x.classList.remove('over'));
   const g = $('ghost');
-  if (e.target.closest('#tl')) {
-    e.preventDefault();
-    const t = task(drag.id), s = dropTime(e), bad = conflict(t.id, s, t.dur);
+  if (target && target.closest('#tl')) {
+    const t = task(drag.id), s = dropTime(y), bad = conflict(t.id, s, t.dur);
     g.style.display = 'block';
     g.style.top = ((s - startMin()) / 60 * H + 1) + 'px';
     g.style.height = (t.dur / 60 * H - 2) + 'px';
     g.className = 'ghost' + (bad ? ' bad' : '');
     g.textContent = bad || hm(s) + '–' + hm(s + t.dur);
-    return;
+    return true;
   }
   if (g) g.style.display = 'none';
-  const z = e.target.closest('[data-zone],[data-slot]');
-  if (z) { e.preventDefault(); z.classList.add('over'); }
-});
+  const z = target && target.closest('[data-zone],[data-slot]');
+  if (z) z.classList.add('over');
+  return !!z;
+}
 
-document.addEventListener('drop', e => {
-  if (!drag) return;
+/** Puts the dragged task where it was let go. */
+function dragDrop(target, y) {
   const t = task(drag.id);
-  if (!t) return;
-  e.preventDefault();
-  if (e.target.closest('#tl')) {
-    const s = dropTime(e), bad = conflict(t.id, s, t.dur);
+  if (!t || !target) return;
+  if (target.closest('#tl')) {
+    const s = dropTime(y), bad = conflict(t.id, s, t.dur);
     if (bad) { toast(bad + '. Pick a free gap.'); return; }
     const patch = { start: s, day: DAY };
     if (t.where === 'dump') patch.where = 'also';
     update(t, patch);
     return;
   }
-  const sl = e.target.closest('[data-slot]');
+  const sl = target.closest('[data-slot]');
   if (sl) {
     const i = +sl.dataset.slot, cur = dayTasks().find(x => x.where === 'top' && x.slot === i);
     if (cur && cur.id !== t.id) {
@@ -477,30 +479,140 @@ document.addEventListener('drop', e => {
     update(t, { where: 'top', slot: i, day: DAY });
     return;
   }
-  const z = e.target.closest('[data-zone]');
+  const z = target.closest('[data-zone]');
   if (!z) return;
   if (z.dataset.zone === 'dump') update(t, { where: 'dump', slot: null, day: null, start: null });
   else update(t, { where: 'also', slot: null, day: DAY });
+}
+
+document.addEventListener('dragover', e => {
+  if (!drag || !task(drag.id)) return;
+  if (dragMove(e.target, e.clientY)) e.preventDefault();
 });
 
-// resize a block from its bottom edge
+document.addEventListener('drop', e => {
+  if (!drag || !task(drag.id)) return;
+  e.preventDefault();
+  dragDrop(e.target, e.clientY);
+});
+
+// ---------- dragging with a finger ----------
+// Press and hold a task for a moment, then move. A quick swipe still scrolls the page.
+const HOLD_MS = 260, HOLD_SLOP = 9, EDGE = 72;
+let touch = null;      // { el, x, y, timer, active, clone, dx, dy, scroller }
+
+function touchEnd(drop) {
+  if (!touch) return;
+  clearTimeout(touch.timer);
+  clearInterval(touch.scroller);
+  const was = touch;
+  touch = null;
+  if (!was.active) return;
+  was.clone.remove();
+  document.body.classList.remove('touch-dragging');
+  if (drop && task(drag.id)) dragDrop(document.elementFromPoint(was.x, was.y), was.y);
+  drag = null;
+  render();
+}
+
+function touchLift() {
+  const el = touch.el, r = el.getBoundingClientRect();
+  touch.active = true;
+  drag = { id: +el.dataset.id, off: el.dataset.blk ? Math.round((touch.y - r.top) / H * 60) : 0 };
+  const c = el.cloneNode(true);
+  c.classList.add('drag-clone');
+  c.removeAttribute('data-id');
+  c.style.width = r.width + 'px';
+  c.style.height = r.height + 'px';
+  touch.dx = touch.x - r.left; touch.dy = touch.y - r.top;
+  c.style.left = r.left + 'px'; c.style.top = r.top + 'px';
+  document.body.appendChild(c);
+  touch.clone = c;
+  el.classList.add('dragging');
+  document.body.classList.add('touch-dragging');
+  if (navigator.vibrate) navigator.vibrate(12);
+  // near the top or bottom edge the page scrolls, so a task can travel to a list that is off screen
+  touch.scroller = setInterval(() => {
+    const step = touch.y < EDGE ? -14 : touch.y > innerHeight - EDGE ? 14 : 0;
+    if (!step) return;
+    scrollBy(0, step);
+    dragMove(document.elementFromPoint(touch.x, touch.y), touch.y);
+  }, 16);
+}
+
+document.addEventListener('touchstart', e => {
+  if (touch) { touchEnd(false); return; }          // a second finger cancels
+  if (e.touches.length !== 1 || editing || drag) return;
+  const el = e.target.closest('[data-id][draggable="true"]');
+  if (!el || e.target.closest('button, input, [data-rs]')) return;   // buttons keep their tap
+  const p = e.touches[0];
+  touch = { el: el, x: p.clientX, y: p.clientY, active: false, timer: setTimeout(touchLift, HOLD_MS) };
+}, { passive: true });
+
+document.addEventListener('touchmove', e => {
+  if (!touch) return;
+  const p = e.touches[0];
+  if (!touch.active) {                              // moved before the hold was up: it is a scroll
+    if (Math.hypot(p.clientX - touch.x, p.clientY - touch.y) > HOLD_SLOP) touchEnd(false);
+    return;
+  }
+  e.preventDefault();
+  touch.x = p.clientX; touch.y = p.clientY;
+  touch.clone.style.left = (p.clientX - touch.dx) + 'px';
+  touch.clone.style.top = (p.clientY - touch.dy) + 'px';
+  const under = document.elementFromPoint(p.clientX, p.clientY);
+  touch.clone.classList.toggle('faint', !!(under && under.closest('#tl')));   // keep the landing time readable
+  dragMove(under, p.clientY);
+}, { passive: false });
+
+document.addEventListener('touchend', () => touchEnd(true));
+document.addEventListener('touchcancel', () => touchEnd(false));
+document.addEventListener('contextmenu', e => { if (touch) e.preventDefault(); });   // no long-press menu mid-drag
+
+// ---------- resize a block from its bottom edge (mouse or finger) ----------
+function resizeStart(t, y0) {
+  const d0 = t.dur;
+  return {
+    move(y) {
+      const d = Math.max(SNAP, Math.round((d0 + (y - y0) / H * 60) / SNAP) * SNAP);
+      if (d !== t.dur && !conflict(t.id, t.start, d)) { t.dur = d; render(); }
+    },
+    end() { if (t.dur !== d0) api('task_update', { id: t.id, patch: { dur: t.dur } }).catch(saveFailed); }
+  };
+}
+
 document.addEventListener('mousedown', e => {
   const id = e.target.dataset && e.target.dataset.rs;
-  if (!id) return;
+  if (!id || !task(+id)) return;
   e.preventDefault();
-  const t = task(+id), y0 = e.clientY, d0 = t.dur;
-  const move = ev => {
-    const d = Math.max(SNAP, Math.round((d0 + (ev.clientY - y0) / H * 60) / SNAP) * SNAP);
-    if (d !== t.dur && !conflict(t.id, t.start, d)) { t.dur = d; render(); }
-  };
+  const rs = resizeStart(task(+id), e.clientY);
+  const move = ev => rs.move(ev.clientY);
   const up = () => {
     document.removeEventListener('mousemove', move);
     document.removeEventListener('mouseup', up);
-    if (t.dur !== d0) api('task_update', { id: t.id, patch: { dur: t.dur } }).catch(saveFailed);
+    rs.end();
   };
   document.addEventListener('mousemove', move);
   document.addEventListener('mouseup', up);
 });
+
+document.addEventListener('touchstart', e => {
+  const h = e.target, id = h.dataset && h.dataset.rs;
+  if (!id || !task(+id) || e.touches.length !== 1) return;
+  const rs = resizeStart(task(+id), e.touches[0].clientY);
+  // Re-drawing replaces the handle, but a touch keeps reporting to the element it started on,
+  // so the listeners go on that element instead of the document.
+  const move = ev => { ev.preventDefault(); rs.move(ev.touches[0].clientY); };
+  const up = () => {
+    h.removeEventListener('touchmove', move);
+    h.removeEventListener('touchend', up);
+    h.removeEventListener('touchcancel', up);
+    rs.end();
+  };
+  h.addEventListener('touchmove', move, { passive: false });
+  h.addEventListener('touchend', up);
+  h.addEventListener('touchcancel', up);
+}, { passive: true });
 
 // ---------- settings ----------
 function showCalState(calendars) {

@@ -154,6 +154,22 @@ dialog textarea{width:100%;border:1.5px solid var(--line);border-radius:10px;pad
 .dlg-foot{display:flex;align-items:center;gap:14px}
 .dlg-foot .hint{margin:0}
 
+/* dragging with a finger */
+.item,.slot:not(.empty),.blk:not(.booked){-webkit-touch-callout:none;-webkit-user-select:none;user-select:none}
+.edit{-webkit-user-select:text;user-select:text}
+.drag-clone{position:fixed;z-index:20;margin:0;pointer-events:none;opacity:.92;box-shadow:0 12px 30px rgba(0,0,0,.28);transform:scale(1.03)}
+.drag-clone.faint{opacity:.3;box-shadow:none}
+.touch-dragging{-webkit-user-select:none;user-select:none}
+.blk .rs{touch-action:none}
+.touch-only{display:none}
+@media(pointer:coarse){
+  .touch-only{display:block}
+  .blk .rs{height:18px}
+  .blk .rs:after{content:"";position:absolute;left:50%;bottom:1px;width:30px;height:3px;margin-left:-15px;border-radius:2px;background:currentColor;opacity:.3}
+  .x,.dur{padding:6px}
+  .check{width:24px;height:24px}
+}
+
 @media(max-width:1000px){
   .cols{grid-template-columns:1fr}
   .col{border-right:0;border-bottom:1px solid var(--line)}

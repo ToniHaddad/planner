@@ -71,6 +71,7 @@ $v = (string) @filemtime(__DIR__ . '/assets/app.js');
       <div class="col">
         <p class="h">1 · Brain dump</p>
         <p class="hint">Empty your head. Sort later.</p>
+        <p class="hint touch-only">To move a task, press and hold it, then drag.</p>
         <div class="add"><input id="new" placeholder="Type and press Enter…" aria-label="New task" autocomplete="off" maxlength="300" autofocus><select id="newp" title="Project"></select></div>
         <div class="zone" id="z-dump" data-zone="dump" data-empty="Head empty. Nice."></div>
         <p class="h gap">Projects</p>
