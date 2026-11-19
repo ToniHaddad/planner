@@ -72,7 +72,7 @@ $v = (string) @filemtime(__DIR__ . '/assets/app.js');
         <p class="h">1 · Brain dump</p>
         <p class="hint">Empty your head. Sort later.</p>
         <p class="hint touch-only">To move a task, press and hold it, then drag.</p>
-        <div class="add"><input id="new" placeholder="Type and press Enter…" aria-label="New task" autocomplete="off" maxlength="300" autofocus><select id="newp" title="Project"></select></div>
+        <div class="add"><input id="new" name="new-task" placeholder="Type and press Enter…" aria-label="New task" autocomplete="off" data-lpignore="true" data-1p-ignore maxlength="300" autofocus><select id="newp" title="Project"></select></div>
         <div class="zone" id="z-dump" data-zone="dump" data-empty="Head empty. Nice."></div>
         <p class="h gap">Projects</p>
         <p class="hint">Click a color to change it everywhere.</p>
@@ -176,11 +176,14 @@ $v = (string) @filemtime(__DIR__ . '/assets/app.js');
 <?php if (!local_mode()): ?>
   <section>
     <h3>Password</h3>
-    <div class="row">
+    <?php /* Its own form with a username field: otherwise Chrome takes the task box (#new),
+             the first text field before these, for the username and offers saved logins in it. */ ?>
+    <form class="row" id="pw-form" autocomplete="on">
+      <input type="text" name="username" value="<?= h((string) ($_SESSION['user'] ?? '')) ?>" autocomplete="username" hidden readonly tabindex="-1" aria-hidden="true">
       <input id="pw-cur" type="password" placeholder="Current password" aria-label="Current password" autocomplete="current-password">
       <input id="pw-new" type="password" placeholder="New password (12+ characters)" aria-label="New password" autocomplete="new-password">
-      <button class="btn" data-act="change-pw">Change</button>
-    </div>
+      <button class="btn" type="submit">Change</button>
+    </form>
   </section>
 <?php endif; ?>
 

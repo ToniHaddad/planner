@@ -369,6 +369,10 @@ document.addEventListener('click', e => {
   if (fn) fn(el.dataset.id ? task(+el.dataset.id) : null, el);
 });
 
+// The password fields sit in a real form so Chrome keeps saved logins out of the task box.
+// It must never post the page: the Change button and Enter both go through the API.
+$('pw-form')?.addEventListener('submit', e => { e.preventDefault(); actions['change-pw'](); });
+
 // rename on double-click
 document.addEventListener('dblclick', e => {
   const el = e.target.closest('[data-title]');
