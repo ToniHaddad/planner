@@ -306,7 +306,7 @@ def run_local(work):
         check("local mode: the right key sets an HttpOnly, SameSite=Strict cookie", cookie is not None
               and cookie.has_nonstandard_attr("HttpOnly") and cookie.get_nonstandard_attr("SameSite") == "Strict")
         check("local mode: board opens without a sign-in", status == 200 and "app.js" in html and 'name="password"' not in html)
-        check("local mode: no password or sign-out controls", 'data-act="change-pw"' not in html and 'data-act="logout"' not in html)
+        check("local mode: no password or sign-out controls", 'id="pw-form"' not in html and 'data-act="logout"' not in html)
         c.csrf = re.search(r'name="csrf" content="([0-9a-f]+)"', html).group(1)
         status, st = c.api("state", day=today)
         check("local mode: state says so", status == 200 and st.get("local") is True and st.get("user") == "")
