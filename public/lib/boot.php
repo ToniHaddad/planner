@@ -168,6 +168,25 @@ function db(): PDO
             throw $e;
         }
     }
+    if ($version < 4) {
+        // Each board has its own projects. The projects that exist stay with the first board.
+        $pdo->exec('BEGIN IMMEDIATE');
+        try {
+            if ((int) $pdo->query('PRAGMA user_version')->fetchColumn() < 4) {
+                $pdo->exec("
+                    ALTER TABLE projects ADD COLUMN board_id INTEGER NOT NULL DEFAULT 1;
+                    UPDATE projects SET board_id = (SELECT id FROM boards ORDER BY sort, id LIMIT 1);
+                    UPDATE tasks SET project_id = NULL WHERE project_id IS NOT NULL
+                        AND board_id <> (SELECT board_id FROM projects WHERE projects.id = tasks.project_id);
+                    PRAGMA user_version = 4;
+                ");
+            }
+            $pdo->exec('COMMIT');
+        } catch (Throwable $e) {
+            $pdo->exec('ROLLBACK');
+            throw $e;
+        }
+    }
     return $pdo;
 }
 

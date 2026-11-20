@@ -38,7 +38,7 @@ What you don't finish goes back to the brain dump the next day, marked "carried"
 - **Projects in color.** Give each project a color; blocks and dots take it everywhere.
 - **Drag and drop, 15-minute snap, resize from the bottom edge, undo on delete.**
 - **Subtasks and notes.** The ⋯ on a task opens a checklist and a notes box under it.
-- **Boards.** Keep separate lists for separate people or areas of work, with buttons at the top to switch. Drag a task onto a button to move it.
+- **Boards.** Keep separate lists for separate people or areas of work, each with its own projects, with buttons at the top to switch. Drag a task onto a button to move it.
 - **Two things at once.** Tasks can share a time on the timeline; they sit side by side.
 - **Dark and vivid**, with a light look one click away.
 - **Yours.** Tasks live in one SQLite file on your machine. The app is plain PHP and plain JavaScript: no frameworks, no build step, nothing to keep updated.

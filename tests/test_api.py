@@ -369,6 +369,45 @@ def run_boards(c, today):
     check("boards: adding without the CSRF token is refused", status == 403)
     status, r = c.api("board_update", {"id": b3, "name": "  Third  one "})
     check("boards: a board is renamed", status == 200 and next(b for b in r["boards"] if b["id"] == b3)["name"] == "Third one", str(r))
+    # each board has its own projects
+    n_first = len(st["projects"])
+    _, r = c.api("project_add", {"name": "Clients", "color": "#112233", "board": b2})
+    p2 = r["project"]["id"]
+    _, on1 = c.api("state", day=today, board=first)
+    _, on2 = c.api("state", day=today, board=b2)
+    check("projects: a new board starts without projects, and its own project shows only there",
+          [p["id"] for p in on2["projects"]] == [p2] and len(on1["projects"]) == n_first
+          and p2 not in [p["id"] for p in on1["projects"]], str(on2["projects"]))
+    _, r = c.api("task_add", {"title": "Project of another board", "p": p2, "board": first})
+    stray = r["task"]["id"]
+    check("projects: a task cannot take a project of another board when added", r["task"]["p"] is None, str(r))
+    _, r = c.api("task_update", {"id": stray, "patch": {"p": p2}})
+    check("projects: nor when changed", r["task"]["p"] is None, str(r))
+    _, r = c.api("task_add", {"title": "Has a project", "p": p2, "board": b2})
+    own = r["task"]["id"]
+    check("projects: a task takes a project of its own board", r["task"]["p"] == p2, str(r))
+    _, r = c.api("task_update", {"id": own, "patch": {"board": first}})
+    check("projects: a task moved to another board arrives without a project", r["task"]["board"] == first and r["task"]["p"] is None, str(r))
+    _, r = c.api("task_update", {"id": own, "patch": {"board": b2}})
+    _, r = c.api("task_update", {"id": own, "patch": {"p": p2}})
+    _, r = c.api("board_add", {"name": "Short lived"})
+    b4 = r["board"]["id"]
+    _, r = c.api("project_add", {"name": "Travels", "color": "#445566", "board": b4})
+    p4 = r["project"]["id"]
+    _, r = c.api("task_add", {"title": "Travels along", "p": p4, "board": b4})
+    along = r["task"]["id"]
+    _, r = c.api("board_delete", {"id": b4})
+    _, on1 = c.api("state", day=today, board=first)
+    moved = next((x for x in on1["tasks"] if x["id"] == along), {})
+    check("projects: a deleted board's projects move with its tasks", r.get("to") == first and moved.get("p") == p4
+          and p4 in [p["id"] for p in on1["projects"]], str(moved))
+    for t in (stray, own, along):
+        c.api("task_delete", {"id": t})
+    c.api("project_delete", {"id": p2})
+    c.api("project_delete", {"id": p4})
+    _, on1 = c.api("state", day=today, board=first)
+    check("projects: the first board's projects are as before", len(on1["projects"]) == n_first)
+
     status, r = c.api("board_update", {"id": b3, "name": " "})
     check("boards: an empty name is refused on rename", status == 400, str(r))
     status, r = c.api("board_update", {"id": 9999, "name": "Ghost"})
@@ -594,7 +633,7 @@ def run_migration(work):
         con = sqlite3.connect(dbfile)
         version = con.execute("PRAGMA user_version").fetchone()[0]
         con.close()
-        check("migration: the database is now version 3", version == 3, str(version))
+        check("migration: the database is now version 4", version == 4, str(version))
         status, st = c.api("state", day=today)
         check("migration: exactly one board, named Main", status == 200 and len(st["boards"]) == 1
               and st["boards"][0]["name"] == "Main" and st["board"] == st["boards"][0]["id"], str(st.get("boards")))

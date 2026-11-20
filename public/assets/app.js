@@ -102,7 +102,7 @@ function goBoard(id) {
   if (id === BOARD) return;
   BOARD = id;
   try { localStorage.setItem('planner_board', String(id)); } catch (e) { /* private window */ }
-  S.board = id; S.tasks = [];
+  S.board = id; S.tasks = []; S.projects = [];
   open.clear();
   render();
   loadState();
@@ -316,6 +316,10 @@ function renderProjects() {
   const sel = $('newp'), keep = sel.value;
   sel.innerHTML = S.projects.map(p => `<option value="${p.id}">${esc(p.name)}</option>`).join('');
   if (keep) sel.value = keep;
+  if (S.projects.length && !sel.value) sel.value = String(S.projects[0].id);    // the last choice was another board's
+  sel.hidden = !S.projects.length;
+  $('projhint').textContent = S.projects.length ? 'Click a color to change it everywhere.'
+    : (S.boards.length > 1 ? 'This board has no projects yet. ' : 'No projects yet. ') + 'Add one to give its tasks a color.';
   $('projects').innerHTML = S.projects.map(p => `<div class="proj">
     <input type="color" value="${safeColor(p.color)}" data-pcolor="${p.id}" title="Project color">
     <input type="text" value="${esc(p.name)}" data-pname="${p.id}" maxlength="60">
@@ -445,7 +449,7 @@ const actions = {
   },
   async 'add-project'() {
     try {
-      const d = await api('project_add', { name: 'New project', color: PALETTE[S.projects.length % PALETTE.length] });
+      const d = await api('project_add', { name: 'New project', color: PALETTE[S.projects.length % PALETTE.length], board: BOARD });
       S.projects.push(d.project); render();
       const el = document.querySelector(`[data-pname="${d.project.id}"]`);
       if (el) { el.focus(); el.select(); }

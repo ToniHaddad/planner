@@ -85,11 +85,13 @@ function get_task(int $id): array
     return $row;
 }
 
-function project_exists($id): bool
+/** Whether the project exists; with a board given, whether it is one of that board's projects. */
+function project_exists($id, ?int $board = null): bool
 {
-    $st = db()->prepare('SELECT 1 FROM projects WHERE id = ?');
+    $st = db()->prepare('SELECT board_id FROM projects WHERE id = ?');
     $st->execute([(int) $id]);
-    return (bool) $st->fetchColumn();
+    $b = $st->fetchColumn();
+    return $b !== false && ($board === null || (int) $b === $board);
 }
 
 const MAX_BOARDS = 8;
@@ -145,7 +147,11 @@ switch ($action) {
             'boards' => boards(),
             'board' => $board,
             'projects' => array_map(fn($p) => ['id' => (int) $p['id'], 'name' => $p['name'], 'color' => $p['color']],
-                $pdo->query('SELECT * FROM projects ORDER BY sort, id')->fetchAll()),
+                (function () use ($pdo, $board) {
+                    $ps = $pdo->prepare('SELECT * FROM projects WHERE board_id = ? ORDER BY sort, id');
+                    $ps->execute([$board]);
+                    return $ps->fetchAll();
+                })()),
             'tasks' => array_map('task_out', $st->fetchAll()),
             'settings' => day_hours(),
             'calendarConnected' => (bool) setting('bridge_url'),
@@ -175,10 +181,11 @@ switch ($action) {
 
     case 'task_add':
         $title = clean_title($in['title'] ?? '');
+        $board = board_id($in['board'] ?? 0);
         $p = $in['p'] ?? null;
-        if ($p !== null && !project_exists($p)) $p = null;
+        if ($p !== null && !project_exists($p, $board)) $p = null;
         $pdo->prepare("INSERT INTO tasks (title, project_id, dur, place, created_at, board_id) VALUES (?, ?, 30, 'dump', ?, ?)")
-            ->execute([$title, $p, gmdate('c'), board_id($in['board'] ?? 0)]);
+            ->execute([$title, $p, gmdate('c'), $board]);
         reply(['task' => task_out(get_task((int) $pdo->lastInsertId()))]);
 
     case 'task_update':
@@ -186,7 +193,7 @@ switch ($action) {
         $patch = is_array($in['patch'] ?? null) ? $in['patch'] : [];
         if (array_key_exists('title', $patch)) $t['title'] = clean_title($patch['title']);
         if (array_key_exists('p', $patch)) {
-            $t['project_id'] = ($patch['p'] !== null && project_exists($patch['p'])) ? (int) $patch['p'] : null;
+            $t['project_id'] = $patch['p'] !== null ? (int) $patch['p'] : null;
         }
         if (array_key_exists('dur', $patch)) {
             $d = (int) $patch['dur'];
@@ -225,6 +232,8 @@ switch ($action) {
             $t['board_id'] = (int) $patch['board'];
             $t['place'] = 'dump';
         }
+        // A project belongs to one board: a task keeps its project only on that board.
+        if ($t['project_id'] !== null && !project_exists($t['project_id'], (int) $t['board_id'])) $t['project_id'] = null;
         // Keep the row consistent whatever the browser sent.
         if ($t['place'] === 'dump') { $t['day'] = null; $t['start'] = null; }
         elseif ($t['day'] === null) fail('A planned task needs a day');
@@ -254,7 +263,8 @@ switch ($action) {
         reply(['boards' => boards()]);
 
     case 'board_delete':
-        // The board's tasks are kept: they move to the brain dump of the first board that stays.
+        // The board's tasks are kept: they move to the brain dump of the first board that stays,
+        // and its projects go with them.
         $id = (int) ($in['id'] ?? 0);
         if (board_id($id) !== $id) fail('That board no longer exists', 404);
         $rest = array_values(array_filter(array_column(boards(), 'id'), fn($b) => $b !== $id));
@@ -262,14 +272,15 @@ switch ($action) {
         $pdo->exec('BEGIN IMMEDIATE');
         $st = $pdo->prepare("UPDATE tasks SET board_id = ?, place = 'dump', day = NULL, start = NULL, slot = NULL WHERE board_id = ?");
         $st->execute([$rest[0], $id]);
+        $pdo->prepare('UPDATE projects SET board_id = ? WHERE board_id = ?')->execute([$rest[0], $id]);
         $pdo->prepare('DELETE FROM boards WHERE id = ?')->execute([$id]);
         $pdo->exec('COMMIT');
         reply(['boards' => boards(), 'moved' => $st->rowCount(), 'to' => $rest[0]]);
 
     case 'project_add':
         $name = mb_substr(trim((string) ($in['name'] ?? '')), 0, 60) ?: 'New project';
-        $pdo->prepare('INSERT INTO projects (name, color, sort) VALUES (?, ?, (SELECT COALESCE(MAX(sort), 0) + 1 FROM projects))')
-            ->execute([$name, clean_color($in['color'] ?? '')]);
+        $pdo->prepare('INSERT INTO projects (name, color, sort, board_id) VALUES (?, ?, (SELECT COALESCE(MAX(sort), 0) + 1 FROM projects), ?)')
+            ->execute([$name, clean_color($in['color'] ?? ''), board_id($in['board'] ?? 0)]);
         reply(['project' => ['id' => (int) $pdo->lastInsertId(), 'name' => $name, 'color' => clean_color($in['color'])]]);
 
     case 'project_update':

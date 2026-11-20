@@ -78,7 +78,7 @@ $theme = ($_COOKIE['planner_theme'] ?? '') === 'light' ? 'light' : 'dark';   // 
         <div class="add"><input id="new" name="task" type="text" placeholder="Type and press Enter…" aria-label="New task" autocomplete="off" data-lpignore="true" data-1p-ignore data-bwignore maxlength="300" autofocus><select id="newp" title="Project"></select></div>
         <div class="zone" id="z-dump" data-zone="dump" data-empty="Head empty. Nice."></div>
         <h2 class="h gap">Projects</h2>
-        <p class="hint">Click a color to change it everywhere.</p>
+        <p class="hint" id="projhint">Click a color to change it everywhere.</p>
         <div id="projects"></div>
         <button class="link" data-act="add-project">+ Add project</button>
       </div>
@@ -170,8 +170,8 @@ $theme = ($_COOKIE['planner_theme'] ?? '') === 'light' ? 'light' : 'dark';   // 
   <section>
     <h3>Boards</h3>
     <p class="hint">A board is its own brain dump, Today's 3 and timeline: one per person or area of work. With more
-      than one, buttons at the top switch between them. Projects and the calendar are shared. To move a task, drag
-      it onto another board's button.</p>
+      than one, buttons at the top switch between them. Each board has its own projects; the calendar and the day
+      hours are shared. To move a task, drag it onto another board's button (it arrives without a project).</p>
     <div id="boards"></div>
     <button class="link" data-act="add-board">+ Add board</button>
   </section>
