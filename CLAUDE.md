@@ -50,7 +50,13 @@ machine paths. Private notes for the owner's own deployment live in `CLAUDE.loca
   or `also`), optionally with a start minute. A task also carries `notes` (text) and `subs` (its subtasks, a JSON
   list of `{title, done}` stored on the task row and always sent as a whole list). Tasks may share a time: only
   calendar events block a drop; `lanes()` in `app.js` lays overlapping blocks side by side. The schema is
-  versioned with `PRAGMA user_version` in `db()`; a schema change is a new `if ($version < N)` step there. Unfinished tasks from past days go back to the dump (`rollover`,
+  versioned with `PRAGMA user_version` in `db()`; a schema change is a new `if ($version < N)` step there.
+- **Boards:** a board is a separate task list (`boards` table, `tasks.board_id`); the first one is "Main".
+  `state` takes `board` and returns only that board's tasks; projects, settings and the calendar are shared.
+  The buttons at the top (`#tabs`) show only when there are two or more boards; the browser remembers its
+  board in `localStorage`. A task dropped on another board's button moves to that board's brain dump.
+  "Send to calendar" sends the day's blocks of every board. Board names are the owner's data: none belong in
+  this repo. Unfinished tasks from past days go back to the dump (`rollover`,
   called by the browser with its local date).
 - **Calendar:** the server never holds Google credentials. An Apps Script web app in the user's Google account
   ("the bridge") answers `events` and `push` for requests carrying the shared key from `data/config.php`. It

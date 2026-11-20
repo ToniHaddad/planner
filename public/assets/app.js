@@ -6,9 +6,11 @@ const PALETTE = ['#ff5fa8', '#4ade80', '#ff9f43', '#4da3ff', '#c77dff', '#ffd23f
 const csrf = document.querySelector('meta[name=csrf]').content;
 const $ = id => document.getElementById(id);
 
-let S = { projects: [], tasks: [], settings: { dayStart: 7, dayEnd: 20 }, calendarConnected: false, user: '', local: false };
+let S = { boards: [], board: 0, projects: [], tasks: [], settings: { dayStart: 7, dayEnd: 20 }, calendarConnected: false, user: '', local: false };
 let CAL = { connected: false, events: [], allDay: [], loading: false };
 let DAY = dayStr(new Date());
+let BOARD = 0;         // the board being shown; 0 until the server says which exist (the choice is kept per device)
+try { BOARD = +localStorage.getItem('planner_board') || 0; } catch (e) { /* private window */ }
 let drag = null;       // { id, off } while a task is being dragged
 let editing = false;   // true while a title is being renamed (pauses re-rendering)
 const open = new Set(); // ids of the tasks whose subtasks and notes are showing
@@ -74,8 +76,9 @@ async function startDay() {
 
 async function loadState() {
   try {
-    const d = await api('state', null, { day: DAY });
+    const d = await api('state', null, { day: DAY, board: BOARD });
     S = d;
+    BOARD = d.board;
     render();
   } catch (err) { toast(err.message); }
 }
@@ -93,6 +96,16 @@ async function loadCalendar(refresh) {
     CAL = { connected: true, events: [], allDay: [], loading: false, error: err.message };
   }
   render();
+}
+
+function goBoard(id) {
+  if (id === BOARD) return;
+  BOARD = id;
+  try { localStorage.setItem('planner_board', String(id)); } catch (e) { /* private window */ }
+  S.board = id; S.tasks = [];
+  open.clear();
+  render();
+  loadState();
 }
 
 function goDay(day) {
@@ -181,8 +194,9 @@ function flushNotes(t) {
 
 async function addTask(title, p) {
   try {
-    const d = await api('task_add', { title: title, p: p });
-    S.tasks.push(d.task); render();
+    const d = await api('task_add', { title: title, p: p, board: BOARD });
+    if (d.task.board === BOARD) S.tasks.push(d.task);
+    render();
   } catch (err) { toast(err.message); }
 }
 
@@ -220,7 +234,7 @@ function removeTask(t) {
  */
 async function restoreTask(old) {
   try {
-    const d = await api('task_add', { title: old.title, p: old.p });
+    const d = await api('task_add', { title: old.title, p: old.p, board: old.board });
     const patch = { dur: old.dur, notes: old.notes || '', subs: old.subs || [] };
     if (old.where !== 'dump') {
       const same = old.day === DAY;
@@ -308,6 +322,19 @@ function renderProjects() {
     <button class="x" title="Delete project (its tasks stay)" data-act="del-project" data-id="${p.id}">×</button></div>`).join('');
 }
 
+/** The buttons at the top, one per board. With a single board there is nothing to switch, so they stay away. */
+function renderBoards() {
+  const el = $('tabs');
+  el.hidden = S.boards.length < 2;
+  el.innerHTML = S.boards.map(b => `<button class="tab ${b.id === BOARD ? 'on' : ''}" data-act="board" data-board="${b.id}" aria-pressed="${b.id === BOARD}">${esc(b.name)}</button>`).join('');
+  const list = $('boards');
+  const a = document.activeElement;
+  if (a && a.dataset && a.dataset.bname && S.boards.some(b => b.id === +a.dataset.bname)) return;   // a name is being typed
+  list.innerHTML = S.boards.map(b => `<div class="proj">
+    <input type="text" value="${esc(b.name)}" data-bname="${b.id}" maxlength="30" aria-label="Board name">
+    ${S.boards.length > 1 ? `<button class="x" title="Delete board (its tasks move to another board)" data-act="del-board" data-board="${b.id}">×</button>` : ''}</div>`).join('');
+}
+
 function renderTimeline() {
   const s0 = startMin();
   let h = '';
@@ -356,6 +383,7 @@ function render(skipProjects) {
   if (editing) return;
   renderLists();
   if (!skipProjects) renderProjects();
+  renderBoards();
   renderTimeline();
   renderHeader();
 }
@@ -365,6 +393,24 @@ const actions = {
   prev() { goDay(shiftDay(DAY, -1)); },
   next() { goDay(shiftDay(DAY, 1)); },
   today() { goDay(dayStr(new Date())); },
+  board(_, btn) { goBoard(+btn.dataset.board); },
+  async 'add-board'() {
+    try {
+      const d = await api('board_add', { name: 'New board' });
+      S.boards = d.boards; renderBoards();
+      const el = document.querySelector(`[data-bname="${d.board.id}"]`);
+      if (el) { el.focus(); el.select(); }
+    } catch (err) { toast(err.message); }
+  },
+  async 'del-board'(_, btn) {
+    const id = +btn.dataset.board, b = S.boards.find(x => x.id === id);
+    if (!b || !confirm('Delete the board "' + b.name + '"? Its tasks are kept: they move to the brain dump of another board.')) return;
+    try {
+      const d = await api('board_delete', { id: id });
+      S.boards = d.boards;
+      if (BOARD === id) { BOARD = 0; goBoard(d.to); } else { renderBoards(); if (d.moved && d.to === BOARD) loadState(); }
+    } catch (err) { toast(err.message); }
+  },
   proj(t) { cycleProject(t); },
   dur(t) { cycleDur(t); },
   done(t) { toggleDone(t); },
@@ -537,6 +583,14 @@ document.addEventListener('input', e => {
 document.addEventListener('change', e => {
   const ds = e.target.dataset || {};
   if (ds.pcolor) api('project_update', { id: +ds.pcolor, color: e.target.value }).catch(saveFailed);
+  if (ds.bname) {
+    const b = S.boards.find(x => x.id === +ds.bname), name = e.target.value.trim();
+    if (!b) return;
+    if (!name) { e.target.value = b.name; return; }
+    b.name = name;
+    api('board_update', { id: b.id, name: name }).then(d => { S.boards = d.boards; renderBoards(); }).catch(saveFailed);
+    renderBoards();
+  }
   if (ds.pname) {
     const p = proj(+ds.pname), name = e.target.value.trim() || 'Project';
     p.name = name; render();
@@ -579,7 +633,7 @@ function dragMove(target, y) {
     return true;
   }
   if (g) g.style.display = 'none';
-  const z = target && target.closest('[data-zone],[data-slot]');
+  const z = target && target.closest('[data-zone],[data-slot],.tab:not(.on)');
   if (z) z.classList.add('over');
   return !!z;
 }
@@ -594,6 +648,18 @@ function dragDrop(target, y) {
     const patch = { start: s, day: DAY };
     if (t.where === 'dump') patch.where = 'also';
     update(t, patch);
+    return;
+  }
+  const tab = target.closest('.tab:not(.on)');
+  if (tab) {
+    const to = S.boards.find(b => b.id === +tab.dataset.board);
+    if (!to) return;
+    flushNotes(t);
+    S.tasks = S.tasks.filter(x => x !== t);
+    open.delete(t.id);
+    api('task_update', { id: t.id, patch: { board: to.id } })
+      .then(() => toast('Moved to ' + to.name + '.'))
+      .catch(saveFailed);
     return;
   }
   const sl = target.closest('[data-slot]');

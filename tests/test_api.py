@@ -267,6 +267,8 @@ def run(site):
     _, st = c.api("state", day=today)
     check("deleting a project keeps its tasks", any(x["id"] == t["id"] and x["p"] is None for x in st["tasks"]))
 
+    run_boards(c, today)
+
     # --- calendar ---
     _, cal = c.api("calendar", day=today)
     check("calendar reports not connected", cal.get("connected") is False)
@@ -343,6 +345,126 @@ def run(site):
         attacker.login("alex", "guess")
     ok, html = attacker.login("alex", "a-much-longer-password")
     check("lockout after 8 wrong attempts, even with the right password", not ok and "Too many wrong attempts" in html)
+
+
+def run_boards(c, today):
+    """Boards: separate task lists. Leaves the database with the one starting board and no extra tasks."""
+    status, st = c.api("state", day=today)
+    first = st.get("board")
+    check("boards: a fresh database has one board named Main",
+          status == 200 and st.get("boards") == [{"id": first, "name": "Main"}] and first == 1, str(st.get("boards")))
+    check("boards: every task says which board it is on", st["tasks"] and all(x.get("board") == first for x in st["tasks"]))
+    base_titles = sorted(x["title"] for x in st["tasks"])
+
+    status, r = c.api("board_add", {"name": "  Side   hustle  "})
+    b2 = r.get("board", {}).get("id")
+    check("boards: a board is added, its name tidied", status == 200 and r["board"]["name"] == "Side hustle"
+          and [b["id"] for b in r["boards"]] == [first, b2], str(r))
+    status, r = c.api("board_add", {"name": "é" * 40})
+    b3 = r.get("board", {}).get("id")
+    check("boards: a name over 30 characters is cut", status == 200 and r["board"]["name"] == "é" * 30, str(r))
+    status, r = c.api("board_add", {"name": "   "})
+    check("boards: an empty name is refused on add", status == 400, str(r))
+    status, r = c.api("board_add", {"name": "x"}, csrf=False)
+    check("boards: adding without the CSRF token is refused", status == 403)
+    status, r = c.api("board_update", {"id": b3, "name": "  Third  one "})
+    check("boards: a board is renamed", status == 200 and next(b for b in r["boards"] if b["id"] == b3)["name"] == "Third one", str(r))
+    status, r = c.api("board_update", {"id": b3, "name": " "})
+    check("boards: an empty name is refused on rename", status == 400, str(r))
+    status, r = c.api("board_update", {"id": 9999, "name": "Ghost"})
+    check("boards: renaming an unknown board gives 404", status == 404, str(r))
+
+    # per-board state
+    _, r = c.api("task_add", {"title": "Only on two", "board": b2})
+    t2 = r["task"]
+    check("boards: a task can be added straight to another board", t2["board"] == b2 and t2["where"] == "dump", str(t2))
+    _, r = c.api("task_add", {"title": "Nowhere board", "board": 9999})
+    t_unknown = r["task"]
+    check("boards: a task added to an unknown board lands on the first one", t_unknown["board"] == first, str(t_unknown))
+    _, r = c.api("task_add", {"title": "No board given"})
+    t_none = r["task"]
+    check("boards: a task added without a board lands on the first one", t_none["board"] == first, str(t_none))
+    _, st1 = c.api("state", day=today, board=first)
+    _, st2 = c.api("state", day=today, board=b2)
+    titles1 = {x["title"] for x in st1["tasks"]}
+    titles2 = {x["title"] for x in st2["tasks"]}
+    check("boards: a task of board 2 does not show in board 1", "Only on two" not in titles1 and st1["board"] == first)
+    check("boards: board 2 shows only its own task, not the brain dump of board 1",
+          titles2 == {"Only on two"} and st2["board"] == b2, str(titles2))
+    check("boards: board 1 keeps its own tasks", {"Nowhere board", "No board given"} <= titles1)
+    check("boards: state lists all boards whichever is in view", st1["boards"] == st2["boards"] and len(st1["boards"]) == 3)
+    _, stx = c.api("state", day=today, board=9999)
+    check("boards: state for an unknown board falls back to the first", stx["board"] == first
+          and {x["title"] for x in stx["tasks"]} == titles1)
+    _, stx = c.api("state", day=today)
+    check("boards: state without a board uses the first", stx["board"] == first)
+
+    # moving a task
+    _, r = c.api("task_add", {"title": "Planned mover"})
+    mover = r["task"]["id"]
+    c.api("task_update", {"id": mover, "patch": {"where": "top", "slot": 1, "day": today, "start": 540, "dur": 60}})
+    status, r = c.api("task_update", {"id": mover, "patch": {"board": first}})
+    check("boards: sending a task to the board it is on changes nothing else", status == 200
+          and r["task"]["where"] == "top" and r["task"]["slot"] == 1 and r["task"]["start"] == 540
+          and r["task"]["day"] == today and r["task"]["board"] == first, str(r))
+    status, r = c.api("task_update", {"id": mover, "patch": {"board": 9999}})
+    check("boards: moving a task to an unknown board gives 404", status == 404, str(r))
+    _, st1 = c.api("state", day=today, board=first)
+    check("boards: ...and the task stays where it was", any(x["id"] == mover and x["where"] == "top" for x in st1["tasks"]))
+    status, r = c.api("task_update", {"id": mover, "patch": {"board": b2}})
+    m = r.get("task", {})
+    check("boards: a planned task moved to another board lands in its brain dump", status == 200 and m.get("board") == b2
+          and m.get("where") == "dump" and m.get("day") is None and m.get("start") is None and m.get("slot") is None, str(r))
+    _, st1 = c.api("state", day=today, board=first)
+    _, st2 = c.api("state", day=today, board=b2)
+    check("boards: the moved task left the first board and shows in the second",
+          all(x["id"] != mover for x in st1["tasks"]) and any(x["id"] == mover for x in st2["tasks"]))
+    _, r = c.api("task_update", {"id": mover, "patch": {"where": "also", "day": today, "start": 600}})
+    check("boards: a task can be planned on a board other than the first",
+          r["task"]["where"] == "also" and r["task"]["board"] == b2, str(r))
+    _, st2 = c.api("state", day=today, board=b2)
+    check("boards: planned tasks show only on their own board's day",
+          any(x["id"] == mover and x["where"] == "also" for x in st2["tasks"]))
+    _, st1 = c.api("state", day=today, board=first)
+    check("boards: ...not on the other board's timeline", all(x["id"] != mover for x in st1["tasks"]))
+
+    # the limit of 8 boards
+    _, r = c.api("state", day=today)
+    have = len(r["boards"])
+    extra = []
+    for i in range(8 - have):
+        status, r = c.api("board_add", {"name": f"Extra {i}"})
+        extra.append(r["board"]["id"])
+    check("boards: up to 8 boards can be made", status == 200 and len(r["boards"]) == 8, str(r))
+    status, r = c.api("board_add", {"name": "Ninth"})
+    check("boards: a 9th board is refused", status == 400, str(r))
+
+    # deleting
+    status, r = c.api("board_delete", {"id": 9999})
+    check("boards: deleting an unknown board gives 404", status == 404, str(r))
+    for i in extra:
+        c.api("board_delete", {"id": i})
+    status, r = c.api("board_delete", {"id": b2})
+    check("boards: deleting a board reports how many tasks moved and where", status == 200 and r["moved"] == 2
+          and r["to"] == first and [b["id"] for b in r["boards"]] == [first, b3], str(r))
+    _, st1 = c.api("state", day=today, board=first)
+    got = {x["id"]: x for x in st1["tasks"]}
+    check("boards: the deleted board's tasks are now in the first board's brain dump, unplanned",
+          mover in got and t2["id"] in got and all(got[i]["where"] == "dump" and got[i]["day"] is None
+          and got[i]["start"] is None and got[i]["board"] == first for i in (mover, t2["id"])), str(got.get(mover)))
+    _, stx = c.api("state", day=today, board=b2)
+    check("boards: asking for the deleted board falls back to the first", stx["board"] == first)
+    status, r = c.api("board_delete", {"id": b3})
+    check("boards: the second-to-last board can go", status == 200 and r["moved"] == 0 and len(r["boards"]) == 1, str(r))
+    status, r = c.api("board_delete", {"id": first})
+    check("boards: the last board cannot be deleted", status == 400, str(r))
+    _, st = c.api("state", day=today)
+    check("boards: one board is left", len(st["boards"]) == 1 and st["boards"][0]["id"] == first)
+
+    for i in (mover, t2["id"], t_unknown["id"], t_none["id"]):
+        c.api("task_delete", {"id": i})
+    _, st = c.api("state", day=today)
+    check("boards: the test tasks are cleaned up", sorted(x["title"] for x in st["tasks"]) == base_titles, str(st["tasks"]))
 
 
 def run_local(work):
@@ -472,7 +594,16 @@ def run_migration(work):
         con = sqlite3.connect(dbfile)
         version = con.execute("PRAGMA user_version").fetchone()[0]
         con.close()
-        check("migration: the database is now version 2", version == 2, str(version))
+        check("migration: the database is now version 3", version == 3, str(version))
+        status, st = c.api("state", day=today)
+        check("migration: exactly one board, named Main", status == 200 and len(st["boards"]) == 1
+              and st["boards"][0]["name"] == "Main" and st["board"] == st["boards"][0]["id"], str(st.get("boards")))
+        old = [x for x in st["tasks"] if x["title"] == "Old task"]
+        check("migration: the old task is on that board", len(old) == 1 and old[0]["board"] == st["board"], str(old))
+        con = sqlite3.connect(dbfile)
+        n = con.execute("SELECT COUNT(*) FROM boards").fetchone()[0]
+        con.close()
+        check("migration: the boards table holds one row", n == 1, str(n))
     finally:
         php.terminate()
 

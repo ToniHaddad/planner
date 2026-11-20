@@ -57,6 +57,7 @@ $theme = ($_COOKIE['planner_theme'] ?? '') === 'light' ? 'light' : 'dark';   // 
 <?php else: ?>
 <div class="wrap">
   <div class="app">
+    <nav class="tabs" id="tabs" aria-label="Boards" hidden></nav>
     <div class="top">
       <button class="btn icon" data-act="prev" title="Previous day" aria-label="Previous day">‹</button>
       <button class="btn" data-act="today">Today</button>
@@ -164,6 +165,15 @@ $theme = ($_COOKIE['planner_theme'] ?? '') === 'light' ? 'light' : 'dark';   // 
     <p class="hint more-cal">Use Outlook, iCloud or another calendar? Anything you subscribe to inside Google Calendar already
       shows up here. If you need a direct connection to something else,
       <a href="<?= h(REPO_URL) ?>/issues/new" target="_blank" rel="noopener">get in touch</a>.</p>
+  </section>
+
+  <section>
+    <h3>Boards</h3>
+    <p class="hint">A board is its own brain dump, Today's 3 and timeline: one per person or area of work. With more
+      than one, buttons at the top switch between them. Projects and the calendar are shared. To move a task, drag
+      it onto another board's button.</p>
+    <div id="boards"></div>
+    <button class="link" data-act="add-board">+ Add board</button>
   </section>
 
   <section>

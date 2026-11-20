@@ -148,6 +148,26 @@ function db(): PDO
             throw $e;
         }
     }
+    if ($version < 3) {
+        // Boards: separate task lists (one per person or area) behind the buttons at the top.
+        // Every existing task goes to the first board.
+        $pdo->exec('BEGIN IMMEDIATE');
+        try {
+            if ((int) $pdo->query('PRAGMA user_version')->fetchColumn() < 3) {
+                $pdo->exec("
+                    CREATE TABLE boards (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, sort INTEGER NOT NULL DEFAULT 0);
+                    INSERT INTO boards (id, name, sort) VALUES (1, 'Main', 1);
+                    ALTER TABLE tasks ADD COLUMN board_id INTEGER NOT NULL DEFAULT 1;
+                    CREATE INDEX tasks_board ON tasks(board_id);
+                    PRAGMA user_version = 3;
+                ");
+            }
+            $pdo->exec('COMMIT');
+        } catch (Throwable $e) {
+            $pdo->exec('ROLLBACK');
+            throw $e;
+        }
+    }
     return $pdo;
 }
 

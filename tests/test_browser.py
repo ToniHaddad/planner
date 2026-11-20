@@ -285,6 +285,114 @@ def run(page):
           and "changed" not in page.locator("#toast-msg").inner_text().lower(), page.locator("#toast-msg").inner_text())
     page.click("[data-act=settings-close]")
 
+    run_boards(page)
+
+
+def run_boards(page):
+    """Boards: tabs appear with two boards, each board has its own lists, a task can be dragged to another board."""
+    page.reload()
+    page.wait_for_selector("#top3 .slot")
+    check("boards: with one board the tabs are hidden", not page.locator("#tabs").is_visible())
+    dump_before = page.locator("#z-dump .item").count()
+    check("boards: the first board has a task to tell it apart by", dump_before >= 1)
+
+    page.click("[data-act=settings-open]")
+    page.click("[data-act=add-board]")
+    for _ in range(50):
+        if page.locator("[data-bname]").count() == 2:
+            break
+        page.wait_for_timeout(100)
+    check("boards: add-board focuses the new board's name input",
+          page.evaluate("document.activeElement.dataset.bname !== undefined")
+          and page.evaluate("document.activeElement.value") == "New board")
+    page.keyboard.press("Control+A")
+    page.keyboard.type("Errands")
+    page.keyboard.press("Tab")
+    page.locator("#tabs .tab:has-text('Errands')").wait_for()
+    check("boards: two boards show two tab buttons", page.locator("#tabs").is_visible()
+          and page.locator("#tabs .tab").count() == 2, str(page.locator("#tabs").inner_text()))
+    check("boards: the first tab is the current one", "on" in page.locator("#tabs .tab").nth(0).get_attribute("class").split()
+          and "on" not in page.locator("#tabs .tab").nth(1).get_attribute("class").split())
+    check("boards: the new board has the name that was typed", page.locator("#tabs .tab").nth(1).inner_text().strip() == "Errands")
+    page.click("[data-act=settings-close]")
+
+    # the second board is empty and separate
+    page.locator("#tabs .tab").nth(1).click()
+    page.locator("#tabs .tab.on:has-text('Errands')").wait_for()
+    page.wait_for_timeout(400)
+    check("boards: the second tab becomes current", page.locator("#tabs .tab").nth(1).get_attribute("class").split().count("on") == 1
+          and page.locator("#tabs .tab.on").count() == 1)
+    check("boards: the second board's brain dump is empty", page.locator("#z-dump .item").count() == 0
+          and page.locator("#tl .blk[data-blk]").count() == 0 and page.locator("#top3 .slot.empty").count() == 3)
+    add(page, "Errand one")
+    add(page, "Errand two")
+    page.locator("#tabs .tab").nth(0).click()
+    page.locator("#tabs .tab.on:has-text('Main')").wait_for()
+    page.wait_for_timeout(400)
+    check("boards: the errands are not on the first board", page.locator("#z-dump .item:has-text('Errand')").count() == 0)
+    check("boards: the first board's tasks are back", page.locator("#z-dump .item").count() == dump_before
+          and page.locator("#tl .blk[data-blk]").count() == 2 and page.locator("#top3 .slot.done").count() == 1)
+
+    # the choice is remembered
+    page.locator("#tabs .tab").nth(1).click()
+    page.locator("#tabs .tab.on:has-text('Errands')").wait_for()
+    page.reload()
+    page.wait_for_selector("#top3 .slot")
+    page.locator("#z-dump .item:has-text('Errand one')").wait_for()
+    check("boards: after a reload the last chosen board is still shown",
+          page.locator("#tabs .tab.on").inner_text().strip() == "Errands" and page.locator("#z-dump .item").count() == 2)
+
+    # drag a task onto the other board's tab
+    page.locator("#z-dump .item:has-text('Errand two')").drag_to(page.locator("#tabs .tab").nth(0))
+    page.wait_for_selector("#toast.on:has-text('Moved to')")
+    check("boards: dragging a task onto a tab says it moved", "Moved to Main" in page.locator("#toast").inner_text(),
+          page.locator("#toast").inner_text())
+    check("boards: the dragged task left this list", page.locator("#z-dump .item:has-text('Errand two')").count() == 0
+          and page.locator("#z-dump .item:has-text('Errand one')").count() == 1)
+    page.locator("#tabs .tab").nth(0).click()
+    page.locator("#tabs .tab.on:has-text('Main')").wait_for()
+    page.locator("#z-dump .item:has-text('Errand two')").wait_for()
+    check("boards: ...and it is in the other board's brain dump", page.locator("#z-dump .item:has-text('Errand two')").count() == 1
+          and page.locator("#z-dump .item").count() == dump_before + 1)
+    page.click("#z-dump .item:has-text('Errand two') [data-act=del]")
+    page.wait_for_timeout(300)
+
+    # markup in a board name is plain text
+    page.click("[data-act=settings-open]")
+    name_box = page.locator("[data-bname]").nth(1)
+    name_box.fill("<b>x</b>")
+    name_box.press("Tab")
+    page.locator("#tabs .tab:has-text('<b>x</b>')").wait_for()
+    check("boards: markup in a board name is shown as text", page.locator("#tabs b").count() == 0
+          and page.locator("#tabs .tab").nth(1).inner_text().strip() == "<b>x</b>")
+    page.reload()
+    page.wait_for_selector("#top3 .slot")
+    check("boards: ...also after a reload", page.locator("#tabs b").count() == 0
+          and page.locator("#tabs .tab:has-text('<b>x</b>')").count() == 1)
+
+    # delete the second board: its task goes to the first board's brain dump
+    page.click("[data-act=settings-open]")
+    check("boards: each board has a delete button when there are two", page.locator("[data-act=del-board]").count() == 2)
+    page.once("dialog", lambda d: d.accept())
+    page.locator("#boards .proj").nth(1).hover()
+    page.locator("[data-act=del-board]").nth(1).click()
+    for _ in range(50):
+        if not page.locator("#tabs").is_visible():
+            break
+        page.wait_for_timeout(100)
+    check("boards: with one board left the tabs are hidden again", not page.locator("#tabs").is_visible())
+    check("boards: the last board has no delete button", page.locator("[data-act=del-board]").count() == 0 and page.locator("[data-bname]").count() == 1,
+          str(page.locator("#boards").inner_html()))
+    page.click("[data-act=settings-close]")
+    page.locator("#z-dump .item:has-text('Errand one')").wait_for()
+    check("boards: the deleted board's task is now in the first board's brain dump",
+          page.locator("#z-dump .item:has-text('Errand one')").count() == 1
+          and page.locator("#z-dump .item").count() == dump_before + 1)
+    page.click("#z-dump .item:has-text('Errand one') [data-act=del]")
+    page.wait_for_timeout(300)
+    check("boards: the board is back to how it started", page.locator("#z-dump .item").count() == dump_before
+          and page.locator("#tl .blk[data-blk]").count() == 2)
+
 
 class Finger:
     """One finger on a phone screen, driven through Chromium's own touch input."""

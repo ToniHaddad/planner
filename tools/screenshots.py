@@ -73,6 +73,9 @@ def seed(c):
     def sub(title, done=False):
         return {"title": title, "done": done}
 
+    c.api("board_update", {"id": 1, "name": "Alex"})                      # three boards, so the buttons show
+    c.api("board_add", {"name": "Sam"})
+    c.api("board_add", {"name": "Studio"})
     add("Send the October invoice", 4, where="also", day=yesterday)       # becomes "carried"
     c.api("rollover", {"today": today})
     add("Reply to Sam about the workshop", 1)
@@ -118,7 +121,7 @@ def main():
         with sync_playwright() as pw:
             browser = pw.chromium.launch()
             for scheme in ("light", "dark"):
-                ctx = browser.new_context(viewport={"width": 1320, "height": 900}, device_scale_factor=2, locale="en-GB")
+                ctx = browser.new_context(viewport={"width": 1320, "height": 950}, device_scale_factor=2, locale="en-GB")
                 ctx.add_cookies([{"name": "planner_theme", "value": scheme, "url": BASE}])
                 page = ctx.new_page()
                 # Mid-morning, so the red "now" line shows on the timeline.

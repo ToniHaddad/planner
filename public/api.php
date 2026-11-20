@@ -51,6 +51,7 @@ function task_out(array $r): array
         'slot' => $r['slot'] === null ? null : (int) $r['slot'],
         'day' => $r['day'], 'start' => $r['start'] === null ? null : (int) $r['start'],
         'done' => (bool) $r['done'], 'carried' => (bool) $r['carried'],
+        'board' => (int) $r['board_id'],
         'notes' => (string) $r['notes'],
         'subs' => json_decode((string) $r['subs'], true) ?: [],
     ];
@@ -91,6 +92,28 @@ function project_exists($id): bool
     return (bool) $st->fetchColumn();
 }
 
+const MAX_BOARDS = 8;
+
+function boards(): array
+{
+    return array_map(fn($b) => ['id' => (int) $b['id'], 'name' => $b['name']],
+        db()->query('SELECT id, name FROM boards ORDER BY sort, id')->fetchAll());
+}
+
+/** The id of the board asked for, or of the first board when that one does not exist (any more). */
+function board_id($v): int
+{
+    $all = array_column(boards(), 'id');
+    return in_array((int) $v, $all, true) ? (int) $v : (int) $all[0];
+}
+
+function clean_board_name($v): string
+{
+    $n = mb_substr(trim(preg_replace('/\s+/u', ' ', (string) $v)), 0, 30);
+    if ($n === '') fail('A board needs a name');
+    return $n;
+}
+
 function clean_title($v): string
 {
     $t = trim(preg_replace('/\s+/u', ' ', (string) $v));
@@ -115,9 +138,12 @@ switch ($action) {
     case 'state':
         $day = $_GET['day'] ?? '';
         if (!valid_day($day)) fail('Bad day');
-        $st = $pdo->prepare("SELECT * FROM tasks WHERE place = 'dump' OR day = ? ORDER BY id");
-        $st->execute([$day]);
+        $board = board_id($_GET['board'] ?? 0);
+        $st = $pdo->prepare("SELECT * FROM tasks WHERE board_id = ? AND (place = 'dump' OR day = ?) ORDER BY id");
+        $st->execute([$board, $day]);
         reply([
+            'boards' => boards(),
+            'board' => $board,
             'projects' => array_map(fn($p) => ['id' => (int) $p['id'], 'name' => $p['name'], 'color' => $p['color']],
                 $pdo->query('SELECT * FROM projects ORDER BY sort, id')->fetchAll()),
             'tasks' => array_map('task_out', $st->fetchAll()),
@@ -151,8 +177,8 @@ switch ($action) {
         $title = clean_title($in['title'] ?? '');
         $p = $in['p'] ?? null;
         if ($p !== null && !project_exists($p)) $p = null;
-        $pdo->prepare("INSERT INTO tasks (title, project_id, dur, place, created_at) VALUES (?, ?, 30, 'dump', ?)")
-            ->execute([$title, $p, gmdate('c')]);
+        $pdo->prepare("INSERT INTO tasks (title, project_id, dur, place, created_at, board_id) VALUES (?, ?, 30, 'dump', ?, ?)")
+            ->execute([$title, $p, gmdate('c'), board_id($in['board'] ?? 0)]);
         reply(['task' => task_out(get_task((int) $pdo->lastInsertId()))]);
 
     case 'task_update':
@@ -193,20 +219,52 @@ switch ($action) {
             if (!$done) $t['done_at'] = null;
             $t['done'] = $done ? 1 : 0;
         }
+        if (array_key_exists('board', $patch) && (int) $patch['board'] !== (int) $t['board_id']) {
+            // A task moved to another board lands in that board's brain dump.
+            if (board_id($patch['board']) !== (int) $patch['board']) fail('That board no longer exists', 404);
+            $t['board_id'] = (int) $patch['board'];
+            $t['place'] = 'dump';
+        }
         // Keep the row consistent whatever the browser sent.
         if ($t['place'] === 'dump') { $t['day'] = null; $t['start'] = null; }
         elseif ($t['day'] === null) fail('A planned task needs a day');
         if ($t['place'] !== 'top') $t['slot'] = null;
         elseif ($t['slot'] === null) fail('A main task needs a slot');
         if ($t['place'] !== 'dump') $t['carried'] = 0;
-        $pdo->prepare('UPDATE tasks SET title=?, project_id=?, dur=?, place=?, slot=?, day=?, start=?, done=?, done_at=?, carried=?, notes=?, subs=? WHERE id=?')
+        $pdo->prepare('UPDATE tasks SET title=?, project_id=?, dur=?, place=?, slot=?, day=?, start=?, done=?, done_at=?, carried=?, notes=?, subs=?, board_id=? WHERE id=?')
             ->execute([$t['title'], $t['project_id'], $t['dur'], $t['place'], $t['slot'], $t['day'], $t['start'],
-                       $t['done'], $t['done_at'], $t['carried'], $t['notes'], $t['subs'], $t['id']]);
+                       $t['done'], $t['done_at'], $t['carried'], $t['notes'], $t['subs'], $t['board_id'], $t['id']]);
         reply(['task' => task_out(get_task((int) $t['id']))]);
 
     case 'task_delete':
         $pdo->prepare('DELETE FROM tasks WHERE id = ?')->execute([(int) ($in['id'] ?? 0)]);
         reply(['ok' => true]);
+
+    case 'board_add':
+        if (count(boards()) >= MAX_BOARDS) fail('That is the most boards the planner holds (' . MAX_BOARDS . ')');
+        $name = clean_board_name($in['name'] ?? '');
+        $pdo->prepare('INSERT INTO boards (name, sort) VALUES (?, (SELECT COALESCE(MAX(sort), 0) + 1 FROM boards))')
+            ->execute([$name]);
+        reply(['board' => ['id' => (int) $pdo->lastInsertId(), 'name' => $name], 'boards' => boards()]);
+
+    case 'board_update':
+        $id = (int) ($in['id'] ?? 0);
+        if (board_id($id) !== $id) fail('That board no longer exists', 404);
+        $pdo->prepare('UPDATE boards SET name = ? WHERE id = ?')->execute([clean_board_name($in['name'] ?? ''), $id]);
+        reply(['boards' => boards()]);
+
+    case 'board_delete':
+        // The board's tasks are kept: they move to the brain dump of the first board that stays.
+        $id = (int) ($in['id'] ?? 0);
+        if (board_id($id) !== $id) fail('That board no longer exists', 404);
+        $rest = array_values(array_filter(array_column(boards(), 'id'), fn($b) => $b !== $id));
+        if (!$rest) fail('The last board cannot be deleted');
+        $pdo->exec('BEGIN IMMEDIATE');
+        $st = $pdo->prepare("UPDATE tasks SET board_id = ?, place = 'dump', day = NULL, start = NULL, slot = NULL WHERE board_id = ?");
+        $st->execute([$rest[0], $id]);
+        $pdo->prepare('DELETE FROM boards WHERE id = ?')->execute([$id]);
+        $pdo->exec('COMMIT');
+        reply(['boards' => boards(), 'moved' => $st->rowCount(), 'to' => $rest[0]]);
 
     case 'project_add':
         $name = mb_substr(trim((string) ($in['name'] ?? '')), 0, 60) ?: 'New project';
