@@ -5,6 +5,7 @@
 declare(strict_types=1);
 require __DIR__ . '/lib/boot.php';
 require __DIR__ . '/lib/calendar.php';
+require __DIR__ . '/lib/series.php';
 
 security_headers();
 header('Content-Type: application/json; charset=utf-8');
@@ -54,7 +55,29 @@ function task_out(array $r): array
         'board' => (int) $r['board_id'],
         'notes' => (string) $r['notes'],
         'subs' => json_decode((string) $r['subs'], true) ?: [],
+        'repeat' => series_rule($r['series_id']),
+        'remind' => remind_out($r['remind']),
     ];
+}
+
+const TASK_REMINDS = [5, 10, 15, 30, 60, 1440];             // minutes before a timed task or event (Google: 5 at least)
+const ALLDAY_REMINDS = [900, 360, 2340, 9540];               // minutes before the first day of an all-day event:
+                                                             // the day before at 09:00 or 18:00, two days or a week before at 09:00
+
+/** A reminder: null, or one of the allowed minute counts. */
+function clean_remind($v, array $allowed): ?int
+{
+    if ($v === null) return null;
+    if ($v === 0) $v = 5;                                    // "at the time" from an older page: the nearest Google allows
+    if (!is_int($v) || !in_array($v, $allowed, true)) fail('Bad reminder');
+    return $v;
+}
+
+/** "today" as the browser sees it (its time zone), trusted only within a day or so of the server's clock. */
+function client_today($v): string
+{
+    if (!valid_day($v) || abs(strtotime($v . ' 12:00 UTC') - time()) > 2 * 86400) fail('Bad day');
+    return $v;
 }
 
 function clean_notes($v): string
@@ -144,6 +167,7 @@ function event_out(array $r): array
         'p' => $r['project_id'] === null ? null : (int) $r['project_id'],
         'notes' => (string) $r['notes'],
         'subs' => json_decode((string) $r['subs'], true) ?: [],
+        'remind' => remind_out($r['remind']),
     ];
 }
 
@@ -185,6 +209,10 @@ function event_apply(array $e, array $in): array
     if (array_key_exists('p', $in)) $e['project_id'] = is_int($in['p']) ? $in['p'] : null;
     if (array_key_exists('notes', $in)) $e['notes'] = clean_notes($in['notes']);
     if (array_key_exists('subs', $in)) $e['subs'] = clean_subs($in['subs']);
+    if (array_key_exists('remind', $in)) {
+        if ($in['remind'] !== null && !is_int($in['remind'])) fail('Bad reminder');
+        $e['remind'] = $in['remind'];
+    }
     // A project belongs to one board: an event keeps it only when it is one of its board's.
     if ($e['project_id'] !== null && !project_exists($e['project_id'], (int) $e['board_id'])) $e['project_id'] = null;
     if (!valid_day($e['day_from']) || !valid_day($e['day_to'])) fail('Bad day');
@@ -196,6 +224,8 @@ function event_apply(array $e, array $in): array
         if ($len > 0) fail('Only a one-day event can have a time');
         if ($e['start'] >= $e['end']) fail('The end time must be after the start time');
     }
+    // an all-day event has other reminders than a timed one
+    if (($e['remind'] ?? null) !== null) $e['remind'] = clean_remind((int) $e['remind'], $e['start'] === null ? ALLDAY_REMINDS : TASK_REMINDS);
     return $e;
 }
 
@@ -238,6 +268,7 @@ switch ($action) {
         $day = $_GET['day'] ?? '';
         if (!valid_day($day)) fail('Bad day');
         $board = board_id($_GET['board'] ?? 0);
+        ensure_occurrences($board, $day, $day);
         $st = $pdo->prepare("SELECT * FROM tasks WHERE board_id = ? AND (place = 'dump' OR day = ?) ORDER BY id");
         $st->execute([$board, $day]);
         reply([
@@ -253,6 +284,7 @@ switch ($action) {
             'events' => events_in($board, $day, $day),
             'settings' => day_hours(),
             'calendarConnected' => (bool) setting('bridge_url'),
+            'sync' => sync_state(),
             'user' => local_mode() ? '' : credentials()['username'],
             'local' => local_mode(),
         ]);
@@ -260,8 +292,10 @@ switch ($action) {
     case 'rollover':
         // Unfinished tasks from earlier days go back to the brain dump. "today" comes from the
         // browser (your time zone); it is only trusted within a day of the server's clock.
-        $today = $in['today'] ?? '';
-        if (!valid_day($today) || abs(strtotime($today . ' 12:00 UTC') - time()) > 2 * 86400) fail('Bad day');
+        $today = client_today($in['today'] ?? '');
+        // Repeating tasks get their copies for the days just gone first, so a missed one is carried over too.
+        ensure_occurrences(null, day_shift($today, -COPY_DAYS_BACK), $today);
+        cal_extras_purge();
         $st = $pdo->prepare("UPDATE tasks SET place = 'dump', day = NULL, start = NULL, slot = NULL, carried = 1
                              WHERE done = 0 AND day IS NOT NULL AND day < ?");
         $st->execute([$today]);
@@ -280,12 +314,14 @@ switch ($action) {
         // Everything the Calendar page shows for the days in view, in one request.
         [$from, $to] = range_param();
         $board = board_id($_GET['board'] ?? 0);
+        ensure_occurrences($board, $from, $to);
         $st = $pdo->prepare("SELECT * FROM tasks WHERE board_id = ? AND day BETWEEN ? AND ?
                              ORDER BY day, place <> 'top', slot, start IS NULL, start, id");
         $st->execute([$board, $from, $to]);
         $tasks = array_map(fn($t) => ['id' => $t['id'], 'title' => $t['title'], 'day' => $t['day'], 'where' => $t['where'],
                                       'slot' => $t['slot'], 'start' => $t['start'], 'dur' => $t['dur'], 'done' => $t['done'],
-                                      'p' => $t['p']], array_map('task_out', $st->fetchAll()));
+                                      'p' => $t['p'], 'repeat' => $t['repeat'], 'remind' => $t['remind']],
+                          array_map('task_out', $st->fetchAll()));
         reply(['events' => events_in($board, $from, $to), 'tasks' => $tasks,
                'google' => calendar_range($from, $to, ($_GET['refresh'] ?? '') === '1')]);
 
@@ -293,22 +329,22 @@ switch ($action) {
         $board = board_id($in['board'] ?? 0);
         if (!array_key_exists('to', $in)) $in['to'] = $in['from'] ?? null;     // a one-day event unless told otherwise
         $e = event_apply(['board_id' => $board, 'title' => '', 'day_from' => '', 'day_to' => '', 'start' => null,
-                          'end' => null, 'location' => '', 'project_id' => null, 'notes' => '', 'subs' => '[]'],
+                          'end' => null, 'location' => '', 'project_id' => null, 'notes' => '', 'subs' => '[]', 'remind' => null],
                          ['title' => $in['title'] ?? ''] + $in);
-        $pdo->prepare('INSERT INTO events (board_id, title, day_from, day_to, start, "end", location, project_id, notes, subs, created_at)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
+        $pdo->prepare('INSERT INTO events (board_id, title, day_from, day_to, start, "end", location, project_id, notes, subs, remind, created_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
             ->execute([$board, $e['title'], $e['day_from'], $e['day_to'], $e['start'], $e['end'], $e['location'],
-                       $e['project_id'], $e['notes'], $e['subs'], gmdate('c')]);
+                       $e['project_id'], $e['notes'], $e['subs'], $e['remind'], gmdate('c')]);
         reply(['event' => event_out(get_event((int) $pdo->lastInsertId()))]);
 
     case 'event_update':
         $e = get_event((int) ($in['id'] ?? 0));
         if (!is_array($in['patch'] ?? null)) fail('Bad change');
-        $patch = array_intersect_key($in['patch'], array_flip(['title', 'from', 'to', 'start', 'end', 'location', 'p', 'notes', 'subs']));
+        $patch = array_intersect_key($in['patch'], array_flip(['title', 'from', 'to', 'start', 'end', 'location', 'p', 'notes', 'subs', 'remind']));
         $e = event_apply($e, $patch);
-        $pdo->prepare('UPDATE events SET title=?, day_from=?, day_to=?, start=?, "end"=?, location=?, project_id=?, notes=?, subs=? WHERE id=?')
+        $pdo->prepare('UPDATE events SET title=?, day_from=?, day_to=?, start=?, "end"=?, location=?, project_id=?, notes=?, subs=?, remind=? WHERE id=?')
             ->execute([$e['title'], $e['day_from'], $e['day_to'], $e['start'], $e['end'], $e['location'], $e['project_id'],
-                       $e['notes'], $e['subs'], $e['id']]);
+                       $e['notes'], $e['subs'], $e['remind'], $e['id']]);
         reply(['event' => event_out(get_event((int) $e['id']))]);
 
     case 'event_delete':
@@ -343,6 +379,7 @@ switch ($action) {
         }
         if (array_key_exists('notes', $patch)) $t['notes'] = clean_notes($patch['notes']);
         if (array_key_exists('subs', $patch)) $t['subs'] = clean_subs($patch['subs']);
+        if (array_key_exists('remind', $patch)) $t['remind'] = clean_remind($patch['remind'], TASK_REMINDS);
         if (array_key_exists('where', $patch)) {
             if (!in_array($patch['where'], ['dump', 'top', 'also'], true)) fail('Bad list');
             $t['place'] = $patch['where'];
@@ -381,14 +418,74 @@ switch ($action) {
         if ($t['place'] !== 'top') $t['slot'] = null;
         elseif ($t['slot'] === null) fail('A main task needs a slot');
         if ($t['place'] !== 'dump') $t['carried'] = 0;
-        $pdo->prepare('UPDATE tasks SET title=?, project_id=?, dur=?, place=?, slot=?, day=?, start=?, done=?, done_at=?, carried=?, notes=?, subs=?, board_id=? WHERE id=?')
+        $pdo->prepare('UPDATE tasks SET title=?, project_id=?, dur=?, place=?, slot=?, day=?, start=?, done=?, done_at=?, carried=?, notes=?, subs=?, board_id=?, remind=? WHERE id=?')
             ->execute([$t['title'], $t['project_id'], $t['dur'], $t['place'], $t['slot'], $t['day'], $t['start'],
-                       $t['done'], $t['done_at'], $t['carried'], $t['notes'], $t['subs'], $t['board_id'], $t['id']]);
+                       $t['done'], $t['done_at'], $t['carried'], $t['notes'], $t['subs'], $t['board_id'], $t['remind'], $t['id']]);
         reply(['task' => task_out(get_task((int) $t['id']))]);
 
     case 'task_delete':
+        $st = $pdo->prepare('SELECT series_id, series_day FROM tasks WHERE id = ?');
+        $st->execute([(int) ($in['id'] ?? 0)]);
+        $copy = $st->fetch();
+        // a deleted copy of a repeating task is remembered, so that day does not get it again
+        if ($copy && $copy['series_id'] !== null) {
+            $pdo->prepare('INSERT OR IGNORE INTO series_skips (series_id, day) VALUES (?, ?)')->execute([$copy['series_id'], $copy['series_day']]);
+        }
         $pdo->prepare('DELETE FROM tasks WHERE id = ?')->execute([(int) ($in['id'] ?? 0)]);
         reply(['ok' => true]);
+
+    case 'task_repeat':
+        // Repeat on, off or changed. On a copy it counts from that copy's day on (from today for a
+        // missed copy in the brain dump); a task in the brain dump is first planned on the day in view.
+        $t = get_task((int) ($in['id'] ?? 0));
+        $rule = $in['rule'] ?? null;
+        if ($rule !== '' && !in_array($rule, REPEAT_RULES, true)) fail('Bad repeat');
+        $view = $in['day'] ?? '';
+        if (!valid_day($view)) fail('Bad day');
+        $today = client_today($in['today'] ?? '');
+        $old = $t['series_id'] === null ? null : (int) $t['series_id'];
+        $from = $t['day'] ?? $today;
+        $pdo->exec('BEGIN IMMEDIATE');
+        try {
+            if ($old !== null) {
+                series_end($old, $from, (int) $t['id']);
+                $t['series_id'] = $t['series_day'] = null;
+            }
+            if ($rule !== '') {
+                if ($t['place'] === 'dump') { $t['place'] = 'also'; $t['day'] = $view; $t['slot'] = null; $t['carried'] = 0; }
+                $t['series_id'] = series_from_task($t, $rule, $t['day']);
+                $t['series_day'] = $t['day'];
+                if ($old !== null) series_hand_over($old, $t['series_id'], $t['day']);
+            }
+            $pdo->prepare('UPDATE tasks SET place=?, day=?, slot=?, carried=?, series_id=?, series_day=? WHERE id=?')
+                ->execute([$t['place'], $t['day'], $t['slot'], $t['carried'], $t['series_id'], $t['series_day'], $t['id']]);
+            $pdo->exec('COMMIT');
+        } catch (Throwable $e) {
+            $pdo->exec('ROLLBACK');
+            throw $e;
+        }
+        series_rule(null, true);
+        reply(['task' => task_out(get_task((int) $t['id']))]);
+
+    case 'series_apply':
+        // "Use these details from this day on": the series starts again from this copy as it is now.
+        $t = get_task((int) ($in['id'] ?? 0));
+        if ($t['series_id'] === null) fail('This task does not repeat');
+        if ($t['day'] === null) fail('Plan the task on a day first');
+        $old = (int) $t['series_id'];
+        $pdo->exec('BEGIN IMMEDIATE');
+        try {
+            series_end($old, $t['day'], (int) $t['id']);
+            $new = series_from_task($t, series_rule($old), $t['day']);
+            series_hand_over($old, $new, $t['day']);
+            $pdo->prepare('UPDATE tasks SET series_id = ?, series_day = ? WHERE id = ?')->execute([$new, $t['day'], $t['id']]);
+            $pdo->exec('COMMIT');
+        } catch (Throwable $e) {
+            $pdo->exec('ROLLBACK');
+            throw $e;
+        }
+        series_rule(null, true);
+        reply(['task' => task_out(get_task((int) $t['id']))]);
 
     case 'board_add':
         if (count(boards()) >= MAX_BOARDS) fail('That is the most boards the planner holds (' . MAX_BOARDS . ')');
@@ -411,10 +508,15 @@ switch ($action) {
         $rest = array_values(array_filter(array_column(boards(), 'id'), fn($b) => $b !== $id));
         if (!$rest) fail('The last board cannot be deleted');
         $pdo->exec('BEGIN IMMEDIATE');
+        // Copies of repeating tasks still to come are made again on the new board; moved, they would only fill its brain dump.
+        $pdo->prepare('DELETE FROM tasks WHERE board_id = ? AND series_id IS NOT NULL AND done = 0 AND day > ?')
+            ->execute([$id, gmdate('Y-m-d')]);
         $st = $pdo->prepare("UPDATE tasks SET board_id = ?, place = 'dump', day = NULL, start = NULL, slot = NULL WHERE board_id = ?");
         $st->execute([$rest[0], $id]);
         $pdo->prepare('UPDATE projects SET board_id = ? WHERE board_id = ?')->execute([$rest[0], $id]);
         $pdo->prepare('UPDATE events SET board_id = ? WHERE board_id = ?')->execute([$rest[0], $id]);
+        // their places in the other board's Today's 3 belong to that board's own tasks
+        $pdo->prepare("UPDATE series SET board_id = ?, place = 'also', slot = NULL WHERE board_id = ?")->execute([$rest[0], $id]);
         $pdo->prepare('DELETE FROM boards WHERE id = ?')->execute([$id]);
         $pdo->exec('COMMIT');
         reply(['boards' => boards(), 'moved' => $st->rowCount(), 'to' => $rest[0]]);
@@ -479,6 +581,7 @@ switch ($action) {
             fail($e->getMessage());
         }
         set_setting('bridge_url', $url);
+        set_setting('sync_old', null);
         $pdo->exec('DELETE FROM cal_cache; DELETE FROM cal_range_cache');
         reply(['ok' => true, 'calendars' => $ping['calendars'] ?? [], 'tz' => $ping['tz'] ?? '']);
 
@@ -486,6 +589,45 @@ switch ($action) {
         set_setting('bridge_url', null);
         $pdo->exec('DELETE FROM cal_cache; DELETE FROM cal_range_cache');
         reply(['ok' => true]);
+
+    case 'cal_extra':
+        // Notes, subtasks and "hidden" for one Google event on one day. The event must be one the
+        // calendar has on that day (as read now, or in the ten-minute copy).
+        $day = $in['day'] ?? '';
+        if (!valid_day($day)) fail('Bad day');
+        $key = $in['key'] ?? '';
+        if (!is_string($key) || !preg_match('/^[0-9a-f]{40}$/', $key)) fail('Bad event');
+        $cal = calendar_day($day, false);
+        $known = array_column(array_merge($cal['events'] ?? [], $cal['allDay'] ?? []), null, 'key');
+        if (!isset($known[$key])) fail('That calendar event is not on this day', 404);
+        $patch = is_array($in['patch'] ?? null) ? $in['patch'] : [];
+        $x = ['notes' => $known[$key]['notes'], 'subs' => json_encode($known[$key]['subs'], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES),
+              'hidden' => $known[$key]['hidden'] ? 1 : 0];
+        if (array_key_exists('notes', $patch)) $x['notes'] = clean_notes($patch['notes']);
+        if (array_key_exists('subs', $patch)) $x['subs'] = clean_subs($patch['subs']);
+        if (array_key_exists('hidden', $patch)) {
+            if (!is_bool($patch['hidden'])) fail('Bad change');
+            $x['hidden'] = $patch['hidden'] ? 1 : 0;
+        }
+        $pdo->prepare('INSERT INTO cal_extras (key, day, notes, subs, hidden, updated_at) VALUES (?, ?, ?, ?, ?, ?)
+                       ON CONFLICT(key) DO UPDATE SET notes = excluded.notes, subs = excluded.subs, hidden = excluded.hidden,
+                       updated_at = excluded.updated_at')->execute([$key, $day, $x['notes'], $x['subs'], $x['hidden'], time()]);
+        reply(['extra' => ['key' => $key, 'notes' => $x['notes'], 'subs' => json_decode($x['subs'], true), 'hidden' => (bool) $x['hidden']]]);
+
+    case 'calendar_sync':
+        if (!setting('bridge_url')) fail('Connect your calendar first (Settings)');
+        $today = client_today($in['today'] ?? '');
+        try {
+            $r = calendar_sync($today);
+        } catch (Throwable $e) {
+            fail($e->getMessage(), 502);
+        }
+        reply(['ok' => true] + $r + ['sync' => sync_state()]);
+
+    case 'auto_sync':
+        if (!is_bool($in['on'] ?? null)) fail('Bad setting');
+        set_setting('auto_sync', $in['on'] ? '1' : '0');
+        reply(['sync' => sync_state()]);
 
     case 'calendar_push':
         $day = $in['day'] ?? '';

@@ -4,13 +4,24 @@
  * leaving Google. Only requests carrying the secret key below are answered.
  *
  * Reads: every calendar you have ticked in Google Calendar (including subscribed
- * ones such as Outlook), except the Planner calendar itself.
- * Writes: only events it created itself, inside a calendar named "Planner".
+ * ones such as Outlook), except the planner's own calendars.
+ * Writes: only events it created itself, inside its own calendars: one per board,
+ * named "Planner <board>" (and, for older planners, one named "Planner").
+ * Remembers which calendar is which board's in the script's properties, and uses
+ * Google's lock service so two updates never run at once.
  */
 const KEY = '__BRIDGE_KEY__';
 const PLANNER_CAL = 'Planner';
+const BOARD_CAL_PREFIX = 'Planner ';
 const TAG = 'planner';
 const TAG_VALUE = 'timebox';
+const KEY_TAG = 'plannerKey';        // which task or event of the planner an event in a board calendar is
+const HASH_TAG = 'plannerHash';      // what it looked like when it was written completely, to tell whether it changed
+const HASH_VERSION = 'v2';           // a new version makes every event be looked at again once
+const SYNC_MAX_ITEMS = 400;          // writes per call, and the time after which a call stops cleanly:
+const SYNC_MAX_MS = 270000;          // Apps Script ends a run after 6 minutes
+const SYNC_KEY = /^(task|event):\d+$/;
+const DAY = /^\d{4}-\d{2}-\d{2}$/;
 const EVENT_COLORS = [['1', '#a4bdfc'], ['2', '#7ae7bf'], ['3', '#dbadff'], ['4', '#ff887c'], ['5', '#fbd75b'],
   ['6', '#ffb878'], ['7', '#46d6db'], ['8', '#e1e1e1'], ['9', '#5484ed'], ['10', '#51b749'], ['11', '#dc2127']];
 
@@ -20,8 +31,8 @@ function authorize() {
 }
 
 function doGet(e) {
-  const p = (e && e.parameter) || {};
-  if (!keyOk_(p.key)) return out_({ error: 'forbidden' });
+  const p = e && e.parameter && typeof e.parameter === 'object' ? e.parameter : null;
+  if (!p || !keyOk_(p.key)) return out_({ error: 'forbidden' });
   try {
     if (p.action === 'ping') return out_(ping_());
     if (p.action === 'events') return out_(events_(p.date));
@@ -33,14 +44,19 @@ function doGet(e) {
 }
 
 function doPost(e) {
-  let body = {};
-  try { body = JSON.parse(e.postData.contents); } catch (err) { body = {}; }
-  if (!keyOk_(body.key)) return out_({ error: 'forbidden' });
+  let body = null;
+  try { body = JSON.parse(e && e.postData ? e.postData.contents : ''); } catch (err) { body = null; }
+  if (!body || typeof body !== 'object' || Array.isArray(body) || !keyOk_(body.key)) return out_({ error: 'forbidden' });
+  if (body.action !== 'push' && body.action !== 'sync') return out_({ error: 'unknown action' });
+  // one writer at a time: two runs at once could make twin calendars or twin events
+  const lock = LockService.getScriptLock();
+  if (!lock.tryLock(1000)) return out_({ error: 'busy' });
   try {
-    if (body.action === 'push') return out_(push_(body.date, body.blocks || []));
-    return out_({ error: 'unknown action' });
+    return out_(body.action === 'push' ? push_(body.date, body.blocks) : sync_(body));
   } catch (err) {
     return out_({ error: String((err && err.message) || err) });
+  } finally {
+    lock.releaseLock();
   }
 }
 
@@ -55,23 +71,61 @@ function out_(obj) {
   return ContentService.createTextOutput(JSON.stringify(obj)).setMimeType(ContentService.MimeType.JSON);
 }
 
+/** The time zone all days and times are read and written in: the script's own (set in its project settings). */
 function tz_() {
-  return CalendarApp.getDefaultCalendar().getTimeZone();
+  return Session.getScriptTimeZone();
 }
 
-/** Midnight at the start of the date and of the next day, in the calendar's time zone. */
+// ---------- days: civil dates, counted in UTC so no clock change can shift them ----------
+function validDay_(s) {
+  if (typeof s !== 'string' || !DAY.test(s)) return false;
+  const d = new Date(s + 'T12:00:00Z');
+  return !isNaN(d.getTime()) && d.toISOString().slice(0, 10) === s;
+}
+
+function shiftDay_(day, n) {
+  const d = new Date(day + 'T12:00:00Z');
+  d.setUTCDate(d.getUTCDate() + n);
+  return d.toISOString().slice(0, 10);
+}
+
+function daysBetween_(a, b) {
+  return Math.round((new Date(b + 'T12:00:00Z').getTime() - new Date(a + 'T12:00:00Z').getTime()) / 86400000);
+}
+
+/** The moment a wall-clock time happens on a day: minutes may run past midnight into the next days. */
+function at_(day, minutes, tz) {
+  const m = ((minutes % 1440) + 1440) % 1440;
+  const hhmm = ('0' + Math.floor(m / 60)).slice(-2) + ':' + ('0' + (m % 60)).slice(-2);
+  return Utilities.parseDate(shiftDay_(day, Math.floor(minutes / 1440)) + ' ' + hhmm, tz, 'yyyy-MM-dd HH:mm');
+}
+
+/** Minutes after midnight on the wall clock, which is what a person reads, also on a day the clocks change. */
+function wallMinutes_(t, tz) {
+  const p = Utilities.formatDate(t, tz, 'HH:mm').split(':');
+  return Number(p[0]) * 60 + Number(p[1]);
+}
+
+/** Midnight at the start of the date and of the next day. */
 function dayBounds_(date) {
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(String(date))) throw new Error('bad date');
+  if (!validDay_(date)) throw new Error('bad date');
   const tz = tz_();
-  const start = Utilities.parseDate(date + ' 00:00', tz, 'yyyy-MM-dd HH:mm');
-  const nextDay = Utilities.formatDate(new Date(start.getTime() + 36 * 3600000), tz, 'yyyy-MM-dd');
-  const end = Utilities.parseDate(nextDay + ' 00:00', tz, 'yyyy-MM-dd HH:mm');
-  return { tz: tz, start: start, end: end };
+  return { tz: tz, start: at_(date, 0, tz), end: at_(shiftDay_(date, 1), 0, tz) };
 }
 
+/** The ids of the board calendars this script made, remembered by board id. */
+function boardCalendarIds_() {
+  const props = PropertiesService.getScriptProperties().getProperties();
+  return Object.keys(props).filter(function (k) { return k.indexOf('board_') === 0; }).map(function (k) { return props[k]; });
+}
+
+/** Every calendar to read: those ticked in Google Calendar, without the planner's own. */
 function readCalendars_() {
+  const own = new Set(boardCalendarIds_());
   return CalendarApp.getAllCalendars().filter(function (c) {
-    return c.isSelected() && !c.isHidden() && c.getName() !== PLANNER_CAL;
+    const name = c.getName();
+    return c.isSelected() && !c.isHidden() && name !== PLANNER_CAL && name.indexOf(BOARD_CAL_PREFIX) !== 0
+      && !own.has(c.getId());
   });
 }
 
@@ -79,64 +133,49 @@ function ping_() {
   return { ok: true, tz: tz_(), calendars: readCalendars_().map(function (c) { return c.getName(); }) };
 }
 
+/** One day: exactly what range_ gives for it, so the two can never disagree. */
 function events_(date) {
-  const b = dayBounds_(date);
-  const events = [], allDay = [];
-  readCalendars_().forEach(function (cal) {
-    const name = cal.getName(), color = cal.getColor();
-    cal.getEvents(b.start, b.end).forEach(function (ev) {
-      try { if (ev.getMyStatus() === CalendarApp.GuestStatus.NO) return; } catch (err) { /* not a guest */ }
-      const title = ev.getTitle() || '(busy)';
-      if (ev.isAllDayEvent()) { allDay.push({ title: title, calendar: name, color: color }); return; }
-      const s = Math.max(0, Math.round((ev.getStartTime().getTime() - b.start.getTime()) / 60000));
-      const e = Math.min(1440, Math.round((ev.getEndTime().getTime() - b.start.getTime()) / 60000));
-      if (e > s) events.push({ title: title, start: s, end: e, calendar: name, color: color });
-    });
-  });
-  events.sort(function (x, y) { return x.start - y.start; });
-  return { ok: true, tz: b.tz, date: date, events: events, allDay: allDay };
+  if (!validDay_(date)) throw new Error('bad date');
+  const r = range_(date, date);
+  return { ok: true, tz: r.tz, date: date, events: r.days[date].events, allDay: r.days[date].allDay };
 }
 
 /**
- * Every day from `from` to `to` (at most 62) in one go, for the planner's Calendar page.
- * One read per calendar, then each event is split over the days it covers, clipped to each
- * day the same way events_ clips it to one.
+ * Every day from `from` to `to` (at most 62) in one go. One read per calendar, padded by a
+ * day on each side so an all-day event of a calendar in another time zone is not missed;
+ * then each event is put on the days it covers, with wall-clock times clipped to each day.
  */
 function range_(from, to) {
-  const first = dayBounds_(from), last = dayBounds_(to), tz = first.tz;
-  if (last.start.getTime() < first.start.getTime()) throw new Error('bad range');
-  // midnight at the start of each day; not every day is 24 hours long
-  const keys = [], starts = [];
-  let d = first.start;
-  while (d.getTime() <= last.start.getTime()) {
-    if (keys.length >= 62) throw new Error('range too long');
-    keys.push(Utilities.formatDate(d, tz, 'yyyy-MM-dd'));
-    starts.push(d);
-    d = Utilities.parseDate(Utilities.formatDate(new Date(d.getTime() + 36 * 3600000), tz, 'yyyy-MM-dd') + ' 00:00', tz, 'yyyy-MM-dd HH:mm');
+  if (!validDay_(from) || !validDay_(to) || to < from) throw new Error('bad range');
+  if (daysBetween_(from, to) >= 62) throw new Error('range too long');
+  const tz = tz_(), keys = [], bounds = new Map(), days = {};
+  for (let k = from; k <= to; k = shiftDay_(k, 1)) {
+    keys.push(k);
+    bounds.set(k, [at_(k, 0, tz).getTime(), at_(shiftDay_(k, 1), 0, tz).getTime()]);
+    days[k] = { events: [], allDay: [] };
   }
-  starts.push(last.end);
-  const days = {};
-  keys.forEach(function (k) { days[k] = { events: [], allDay: [] }; });
-  const scriptTz = Session.getScriptTimeZone();
+  const qStart = at_(shiftDay_(from, -1), 0, tz), qEnd = at_(shiftDay_(to, 2), 0, tz);
   readCalendars_().forEach(function (cal) {
     const name = cal.getName(), color = cal.getColor();
-    cal.getEvents(first.start, last.end).forEach(function (ev) {
+    cal.getEvents(qStart, qEnd).forEach(function (ev) {
       try { if (ev.getMyStatus() === CalendarApp.GuestStatus.NO) return; } catch (err) { /* not a guest */ }
-      const title = ev.getTitle() || '(busy)';
+      const title = ev.getTitle() || '(busy)', id = ev.getId();
       if (ev.isAllDayEvent()) {
-        // all-day dates are midnight in the script's time zone; the end date is the day after the last
-        const a = Utilities.formatDate(ev.getAllDayStartDate(), scriptTz, 'yyyy-MM-dd');
-        const b = Utilities.formatDate(ev.getAllDayEndDate(), scriptTz, 'yyyy-MM-dd');
-        keys.forEach(function (k) { if (k >= a && (k < b || (k === a && a === b))) days[k].allDay.push({ title: title, calendar: name, color: color }); });
+        // the dates are midnight in the script's time zone; the end date is the day after the last
+        const a = Utilities.formatDate(ev.getAllDayStartDate(), tz, 'yyyy-MM-dd');
+        const b = Utilities.formatDate(ev.getAllDayEndDate(), tz, 'yyyy-MM-dd');
+        keys.forEach(function (k) {
+          if (k >= a && (k < b || (k === a && a === b))) days[k].allDay.push({ id: id, title: title, calendar: name, color: color });
+        });
         return;
       }
-      const evStart = ev.getStartTime().getTime(), evEnd = ev.getEndTime().getTime();
-      keys.forEach(function (k, i) {
-        const day0 = starts[i].getTime();
-        if (evStart >= starts[i + 1].getTime() || evEnd <= day0) return;
-        const s = Math.max(0, Math.round((evStart - day0) / 60000));
-        const e = Math.min(1440, Math.round((evEnd - day0) / 60000));
-        if (e > s) days[k].events.push({ title: title, start: s, end: e, calendar: name, color: color });
+      const s = ev.getStartTime(), e = ev.getEndTime();
+      keys.forEach(function (k) {
+        const d = bounds.get(k);
+        if (s.getTime() >= d[1] || e.getTime() <= d[0]) return;
+        const start = s.getTime() <= d[0] ? 0 : wallMinutes_(s, tz);
+        const end = e.getTime() >= d[1] ? 1440 : wallMinutes_(e, tz);
+        if (end > start) days[k].events.push({ id: id, title: title, start: start, end: end, calendar: name, color: color });
       });
     });
   });
@@ -160,8 +199,9 @@ function nearestColor_(hex) {
   return best;
 }
 
-/** Replaces the planner's own blocks on that date. Safe to run again: no duplicates. */
+/** For older planners: replaces the planner's blocks on that date in the calendar named "Planner". */
 function push_(date, blocks) {
+  if (!validDay_(date) || !Array.isArray(blocks)) throw new Error('bad request');
   const b = dayBounds_(date);
   const found = CalendarApp.getCalendarsByName(PLANNER_CAL);
   const cal = found.length ? found[0] : CalendarApp.createCalendar(PLANNER_CAL, { timeZone: b.tz });
@@ -170,16 +210,176 @@ function push_(date, blocks) {
     if (ev.getTag(TAG) === TAG_VALUE && ev.getStartTime().getTime() >= b.start.getTime()) { ev.deleteEvent(); removed++; }
   });
   blocks.slice(0, 60).forEach(function (blk) {
+    if (!blk || typeof blk !== 'object') return;
     const startMin = Number(blk.start), dur = Number(blk.dur);
     if (!(startMin >= 0 && startMin < 1440 && dur > 0 && dur <= 1440)) return;
-    const hh = ('0' + Math.floor(startMin / 60)).slice(-2), mm = ('0' + (startMin % 60)).slice(-2);
-    const start = Utilities.parseDate(date + ' ' + hh + ':' + mm, b.tz, 'yyyy-MM-dd HH:mm');
-    const ev = cal.createEvent(String(blk.title || 'Block').slice(0, 200), start,
-      new Date(start.getTime() + dur * 60000), { description: 'Created by Planner' });
+    const ev = cal.createEvent(String(blk.title || 'Block').slice(0, 200), at_(date, startMin, b.tz),
+      at_(date, startMin + dur, b.tz), { description: 'Created by Planner' });
     ev.setTag(TAG, TAG_VALUE);
     const color = nearestColor_(blk.color);
     if (color) { try { ev.setColor(color); } catch (err) { /* color is optional */ } }
     created++;
   });
   return { ok: true, created: created, removed: removed };
+}
+
+// ---------- sync: one calendar per board ----------
+const isObj_ = function (v) { return !!v && typeof v === 'object' && !Array.isArray(v); };
+const isInt_ = function (v, lo, hi) { return Number.isSafeInteger(v) && v >= lo && v <= hi; };
+
+/** The whole request is checked before anything in Google is touched. */
+function validSync_(body) {
+  if (!validDay_(body.from) || !validDay_(body.to) || body.to < body.from || daysBetween_(body.from, body.to) > 400) return false;
+  if (!Array.isArray(body.boards) || body.boards.length > 20) return false;
+  const ids = new Set(), keys = new Set();
+  return body.boards.every(function (b) {
+    if (!isObj_(b) || !isInt_(b.id, 1, Number.MAX_SAFE_INTEGER) || ids.has(b.id)) return false;
+    ids.add(b.id);
+    if (typeof b.name !== 'string' || !b.name.trim() || b.name.length > 60 || !Array.isArray(b.items)) return false;
+    return b.items.every(function (it) {
+      if (!isObj_(it) || typeof it.key !== 'string' || !SYNC_KEY.test(it.key) || keys.has(it.key)) return false;
+      keys.add(it.key);
+      if (typeof it.title !== 'string' || it.title.length > 1000) return false;
+      if (it.description !== undefined && (typeof it.description !== 'string' || it.description.length > 20000)) return false;
+      if (it.color !== undefined && it.color !== null && typeof it.color !== 'string') return false;
+      if (it.remind !== undefined && it.remind !== null && !isInt_(it.remind, 0, 40320)) return false;
+      if (it.allDay === true) {
+        const from = it.from || it.date, to = it.to || from;
+        return validDay_(from) && validDay_(to) && from <= to && daysBetween_(from, to) <= 400;
+      }
+      return it.allDay === false && validDay_(it.date) && isInt_(it.start, 0, 1439) && isInt_(it.dur, 1, 1440);
+    });
+  });
+}
+
+/**
+ * Brings one Google calendar per board up to date with the planner, for the days from `from` to `to`:
+ * { from, to, boards: [{ id, name, items: [{ key, title, description, allDay, date, start, dur,
+ * from, to, color, remind }] }] }. It works by difference: events it made that are unchanged stay,
+ * changed ones are written again (the new one first), and ones the planner no longer has go, but
+ * only inside the window, so past days keep their record. It never touches an event it did not
+ * tag itself, and never deletes a calendar.
+ */
+function sync_(body) {
+  if (!validSync_(body)) throw new Error('bad request');
+  const tz = tz_(), began = Date.now();
+  const run = { partial: false, late: function () { return Date.now() - began > SYNC_MAX_MS; } };
+  const win = [at_(body.from, 0, tz).getTime(), at_(shiftDay_(body.to, 1), 0, tz).getTime()];
+  // an event can sit anywhere when its item moves into the window: look wide, act by key
+  const wide = [at_(shiftDay_(body.from, -60), 0, tz), at_(shiftDay_(body.to, 400), 0, tz)];
+  const counts = { created: 0, updated: 0, removed: 0 }, calendars = [];
+  let written = 0;
+  for (const board of body.boards) {
+    if (run.late()) { run.partial = true; break; }
+    const cal = boardCalendar_(board, tz);
+    calendars.push({ id: cal.getId(), name: cal.getName() });
+    const wanted = new Map(board.items.map(function (it) { return [it.key, it]; }));
+    const have = new Map();
+    cal.getEvents(wide[0], wide[1]).forEach(function (ev) {
+      const key = ev.getTag(KEY_TAG);
+      if (!key) return;                                   // not one of ours: never touched
+      if (!have.has(key)) have.set(key, []);
+      have.get(key).push(ev);
+    });
+    for (const it of board.items) {
+      if (run.partial) break;
+      const hash = hash_(it), olds = have.get(it.key) || [];
+      const good = olds.filter(function (ev) { return ev.getTag(HASH_TAG) === hash; });
+      if (good.length) {
+        // up to date; twins an interrupted run left behind go, the complete one stays
+        for (const ev of olds) {
+          if (ev === good[0]) continue;
+          if (run.late()) { run.partial = true; break; }
+          ev.deleteEvent(); counts.removed++;
+        }
+        continue;
+      }
+      if (written >= SYNC_MAX_ITEMS || run.late()) { run.partial = true; break; }
+      writeItem_(cal, it, hash, tz);                      // the new one first: a crash leaves a twin, never a gap
+      written++;
+      if (olds.length) counts.updated++; else counts.created++;
+      for (const ev of olds) {
+        if (run.late()) { run.partial = true; break; }
+        ev.deleteEvent();
+      }
+    }
+    if (run.partial) break;
+    for (const entry of have) {
+      if (wanted.has(entry[0])) continue;
+      for (const ev of entry[1]) {
+        if (ev.getStartTime().getTime() >= win[1] || ev.getEndTime().getTime() <= win[0]) continue;   // outside the window: kept
+        if (run.late()) { run.partial = true; break; }
+        ev.deleteEvent(); counts.removed++;
+      }
+      if (run.partial) break;
+    }
+    if (run.partial) break;
+  }
+  // only once the new events are all there: the old "Send to calendar" blocks would show twice
+  if (!run.partial) counts.removed += clearOldBlocks_(new Date(win[0]), new Date(win[1]), run);
+  return { ok: true, created: counts.created, updated: counts.updated, removed: counts.removed, partial: run.partial, calendars: calendars };
+}
+
+/** The board's own calendar, "Planner <name>". Remembered by id, so a renamed board renames its calendar. */
+function boardCalendar_(board, tz) {
+  const props = PropertiesService.getScriptProperties();
+  const prop = 'board_' + board.id;
+  const name = BOARD_CAL_PREFIX + board.name.trim();
+  const id = props.getProperty(prop);
+  let cal = id ? CalendarApp.getCalendarById(id) : null;
+  if (!cal) {
+    cal = CalendarApp.createCalendar(name, { timeZone: tz });
+    props.setProperty(prop, cal.getId());
+  } else if (cal.getName() !== name) {
+    cal.setName(name);
+  }
+  return cal;
+}
+
+/** Blocks the old "Send to calendar" put in the calendar named "Planner", inside the window. */
+function clearOldBlocks_(start, end, run) {
+  let removed = 0;
+  for (const cal of CalendarApp.getCalendarsByName(PLANNER_CAL)) {
+    for (const ev of cal.getEvents(start, end)) {
+      if (ev.getTag(TAG) !== TAG_VALUE) continue;
+      if (run.late()) { run.partial = true; return removed; }
+      ev.deleteEvent(); removed++;
+    }
+  }
+  return removed;
+}
+
+/** A short fingerprint of an item: when it changes, the event is written again. */
+function hash_(it) {
+  const from = it.allDay ? (it.from || it.date) : null;
+  const s = JSON.stringify([HASH_VERSION, it.title, it.description || '', it.allDay, it.allDay ? null : it.date,
+    it.allDay ? null : it.start, it.allDay ? null : it.dur, from, it.allDay ? (it.to || from) : null, it.color || null,
+    it.remind === undefined ? null : it.remind]);
+  let h = 2166136261;
+  for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 16777619) >>> 0; }
+  return h.toString(36) + '.' + s.length.toString(36);
+}
+
+function writeItem_(cal, it, hash, tz) {
+  const title = String(it.title || 'Planner').slice(0, 200);
+  const opts = { description: String(it.description || '').slice(0, 4000) };
+  let ev;
+  if (it.allDay) {
+    // Google's all-day end date is the day after the last one; noon keeps a date from slipping
+    const from = it.from || it.date, to = it.to || from;
+    const start = at_(from, 720, tz);
+    ev = from === to ? cal.createAllDayEvent(title, start, opts) : cal.createAllDayEvent(title, start, at_(shiftDay_(to, 1), 720, tz), opts);
+  } else {
+    // wall-clock start and end, so the length is right on a day the clocks change
+    ev = cal.createEvent(title, at_(it.date, it.start, tz), at_(it.date, it.start + it.dur, tz), opts);
+  }
+  ev.setTag(KEY_TAG, it.key);           // at once: a half-written event is still found, and repaired, next time
+  let complete = true;
+  try {
+    ev.removeAllReminders();
+    if (it.remind !== null && it.remind !== undefined) ev.addPopupReminder(Math.min(40320, Math.max(5, Math.round(it.remind))));
+  } catch (err) { complete = false; }
+  const color = nearestColor_(it.color);
+  if (color) { try { ev.setColor(color); } catch (err) { complete = false; } }
+  if (complete) ev.setTag(HASH_TAG, hash);   // last: only a complete event looks up to date
 }

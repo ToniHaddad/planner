@@ -59,6 +59,14 @@ class Bridge(http.server.BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def do_POST(self):
+        # the planner brings Google up to date when it opens: say it went fine
+        n = int(self.headers.get("Content-Length") or 0)
+        body = json.loads(self.rfile.read(n) or b"{}")
+        boards = body.get("boards", [])
+        self.send({"ok": True, "created": sum(len(b["items"]) for b in boards), "updated": 0, "removed": 0, "partial": False,
+                   "calendars": [{"id": str(b["id"]), "name": "Planner " + b["name"]} for b in boards]})
+
     def do_GET(self):
         q = dict(urllib.parse.parse_qsl(urllib.parse.urlparse(self.path).query))
         if q.get("action") == "ping":
@@ -101,11 +109,12 @@ def seed(c):
     report = add("Finish the quarterly report", 1, where="top", slot=0, day=today, start=10 * 60, dur=120,
                  subs=[sub("Pull the sales numbers", True), sub("Write the summary"), sub("Send to Dana for review")],
                  notes="Numbers are in the shared folder.")
-    add("Water the plants", 2, where="also", day=today, start=18 * 60, dur=30)     # same time as the run
+    plants = add("Water the plants", 2, where="also", day=today, start=18 * 60, dur=30, remind=10)   # same time as the run
+    c.api("task_repeat", {"id": plants, "rule": "daily", "day": today, "today": today})
     add("Prepare slides for Thursday", 1, where="top", slot=1, day=today, start=13 * 60 + 30, dur=90)
     add("Run 5 km", 2, where="top", slot=2, day=today, start=18 * 60, dur=45)
     add("Review pull requests", 1, where="also", day=today, start=8 * 60, dur=60, done=True)
-    add("Practise Spanish", 3, where="also", day=today, start=16 * 60 + 30, dur=30)
+    add("Practise Spanish", 3, where="also", day=today, start=15 * 60, dur=30)       # beside the client call
     add("Pay the electricity bill", 4, where="also", day=today, dur=15)
     later = lambda n: (date.today() + timedelta(days=n)).isoformat()
     add("Order the workshop materials", 1, where="top", slot=0, day=later(1))
@@ -173,10 +182,10 @@ def main():
                     page.locator("#settings").screenshot(path=str(OUT / "calendar-setup.png"))
                     page.fill("#bridge-url", f"http://127.0.0.1:{BRIDGE_PORT}/exec")
                     page.click("[data-act=connect-cal]")
-                    page.wait_for_selector("#tl .booked")
+                    page.wait_for_selector("#tl .gcal")
                     page.click("[data-act=settings-close]")
                 else:
-                    page.wait_for_selector("#tl .booked")
+                    page.wait_for_selector("#tl .gcal")
                 page.click(f"#top3 [data-act=more][data-id='{report}']")      # show a task's subtasks and notes
                 page.wait_for_selector("#top3 .details")
                 page.wait_for_timeout(4200)          # let the "Connected" message fade

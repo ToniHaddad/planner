@@ -212,6 +212,40 @@ function db(): PDO
             throw $e;
         }
     }
+    if ($version < 6) {
+        // Repeating tasks: a series holds the pattern, and each day gets an ordinary task made from it
+        // (series_id + series_day; a copy the owner deleted is remembered in series_skips so it is not
+        // made again). Reminders on tasks and events. Notes, subtasks and "hidden" for Google events,
+        // which the planner only reads, live in cal_extras.
+        $pdo->exec('BEGIN IMMEDIATE');
+        try {
+            if ((int) $pdo->query('PRAGMA user_version')->fetchColumn() < 6) {
+                $pdo->exec("
+                    CREATE TABLE series (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT, board_id INTEGER NOT NULL DEFAULT 1,
+                        rule TEXT NOT NULL, anchor_day TEXT NOT NULL, until_day TEXT,
+                        title TEXT NOT NULL, project_id INTEGER REFERENCES projects(id) ON DELETE SET NULL,
+                        dur INTEGER NOT NULL DEFAULT 30, start INTEGER, place TEXT NOT NULL DEFAULT 'also', slot INTEGER,
+                        notes TEXT NOT NULL DEFAULT '', subs TEXT NOT NULL DEFAULT '[]', remind INTEGER, created_at TEXT NOT NULL);
+                    CREATE INDEX series_board ON series(board_id);
+                    CREATE TABLE series_skips (series_id INTEGER NOT NULL, day TEXT NOT NULL, PRIMARY KEY (series_id, day));
+                    ALTER TABLE tasks ADD COLUMN series_id INTEGER;
+                    ALTER TABLE tasks ADD COLUMN series_day TEXT;
+                    ALTER TABLE tasks ADD COLUMN remind INTEGER;
+                    CREATE UNIQUE INDEX tasks_series_day ON tasks(series_id, series_day) WHERE series_id IS NOT NULL;
+                    ALTER TABLE events ADD COLUMN remind INTEGER;
+                    CREATE TABLE cal_extras (key TEXT PRIMARY KEY, day TEXT NOT NULL, notes TEXT NOT NULL DEFAULT '',
+                        subs TEXT NOT NULL DEFAULT '[]', hidden INTEGER NOT NULL DEFAULT 0, updated_at INTEGER NOT NULL);
+                    CREATE INDEX cal_extras_day ON cal_extras(day);
+                    PRAGMA user_version = 6;
+                ");
+            }
+            $pdo->exec('COMMIT');
+        } catch (Throwable $e) {
+            $pdo->exec('ROLLBACK');
+            throw $e;
+        }
+    }
     return $pdo;
 }
 

@@ -25,9 +25,20 @@ let subDrag = null;    // { id, i } while a subtask is being dragged to a new pl
 let evDrag = null;     // { id, off } while an event is being dragged to another day (off: which of its days was grabbed)
 let editing = false;   // true while a title is being renamed (pauses re-rendering)
 let EV = null;         // the event open in the event dialog: { id, subs }; id is null for a new one
+let GE = null;         // the Google event open in its dialog: { day, key }
+// sending the plan to Google: one run at a time; `again` asks for one more when changes came in meanwhile
+const SYNC = { running: false, again: false, timer: 0, error: '' };
 const open = new Set(); // ids of the tasks whose subtasks and notes are showing
 
 // ---------- helpers ----------
+const REPEATS = [['', 'Never'], ['daily', 'Every day'], ['weekdays', 'Weekdays (Mon–Fri)'], ['weekly', 'Every week'], ['monthly', 'Every month']];
+const REMINDS = [[null, 'No reminder'], [5, '5 minutes before'], [10, '10 minutes before'], [15, '15 minutes before'],
+  [30, '30 minutes before'], [60, '1 hour before'], [1440, '1 day before']];
+// an all-day event: minutes before its first day begins
+const ALLDAY_REMINDS = [[null, 'No reminder'], [900, 'The day before at 09:00'], [360, 'The day before at 18:00'],
+  [2340, 'Two days before at 09:00'], [9540, 'A week before at 09:00']];
+const options = (list, value) => list.map(([v, label]) => `<option value="${v === null ? '' : v}"${v === value ? ' selected' : ''}>${label}</option>`).join('');
+const choiceName = (list, value) => (list.find(c => c[0] === value) || [null, ''])[1];
 function dayStr(d) { return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0'); }
 function dayDate(s) { const p = s.split('-').map(Number); return new Date(p[0], p[1] - 1, p[2]); }
 function shiftDay(s, n) { const d = dayDate(s); d.setDate(d.getDate() + n); return dayStr(d); }
@@ -95,6 +106,9 @@ async function startDay() {
   try { await api('rollover', { today: dayStr(new Date()) }); } catch (err) { /* the board still loads */ }
   await loadState();
   if (PAGE === 'calendar') { loadMonth(false); loadUpcoming(); } else loadCalendar(false);
+  // Google is brought up to date when the planner opens, unless that happened in the last half hour
+  const sy = S.sync || {};
+  if (S.calendarConnected && sy.auto && (!sy.last || Date.now() - sy.last.at * 1000 > 30 * 60000)) runSync(false);
 }
 
 async function loadState() {
@@ -220,30 +234,35 @@ function setView(v) {
 }
 
 // ---------- planning rules ----------
-/** Busy time from the calendar, clipped to the visible day. */
-function booked() {
-  return CAL.events.map(e => ({ s: Math.max(e.start, startMin()), e: Math.min(e.end, endMin()), title: e.title, calendar: e.calendar }))
-    .filter(b => b.e > b.s);
+/**
+ * Google's timed events of the day, clipped to the day hours and ready to sit on the timeline
+ * beside the tasks (lanes() takes both). Hidden ones are left out.
+ */
+function gBlocks() {
+  return CAL.events.filter(e => !e.hidden)
+    .map(e => ({ id: 'g:' + e.key, g: true, ev: e, start: Math.max(e.start, startMin()), end: Math.min(e.end, endMin()) }))
+    .filter(b => b.end > b.start).map(b => Object.assign(b, { dur: b.end - b.start }));
 }
 const dayTasks = () => S.tasks.filter(t => t.day === DAY);
 const scheduled = () => dayTasks().filter(t => t.start !== null);
 
-/** Why a block cannot go there, or '' when it can. */
+/** Why a block cannot go there, or '' when it can. Calendar events do not stop a task: it sits beside them. */
 function conflict(s, d) {
   if (s < startMin() || s + d > endMin()) return 'Outside your day hours';
-  for (const b of booked()) if (s < b.e && s + d > b.s) return 'Booked: ' + b.title;
   return '';
 }
 
 /**
- * Tasks may share a time. Those that do sit side by side: returns, for each task id, its
- * column and how many columns its group of overlapping tasks needs.
+ * Tasks and calendar events may share a time. Those that do sit side by side: returns, for each
+ * id, its column and how many columns its group of overlapping blocks needs. At the same start a
+ * calendar event comes first.
  */
 function lanes(list) {
   const out = new Map();
   let group = [], ends = [], groupEnd = -1;
   const close = () => { group.forEach(t => { out.get(t.id).cols = ends.length; }); group = []; ends = []; };
-  list.slice().sort((a, b) => a.start - b.start || a.id - b.id).forEach(t => {
+  const order = (a, b) => a.start - b.start || (b.g ? 1 : 0) - (a.g ? 1 : 0) || (a.g ? (a.id < b.id ? -1 : 1) : a.id - b.id);
+  list.slice().sort(order).forEach(t => {
     if (group.length && t.start >= groupEnd) close();
     let col = ends.findIndex(e => e <= t.start);
     if (col < 0) col = ends.length;
@@ -257,7 +276,7 @@ function lanes(list) {
 }
 
 function freeMinutes() {
-  const spans = booked().map(b => [b.s, b.e]).concat(scheduled().map(t => [Math.max(t.start, startMin()), Math.min(t.start + t.dur, endMin())]))
+  const spans = gBlocks().map(b => [b.start, b.end]).concat(scheduled().map(t => [Math.max(t.start, startMin()), Math.min(t.start + t.dur, endMin())]))
     .filter(x => x[1] > x[0]).sort((a, b) => a[0] - b[0]);
   let used = 0, cur = -1;
   for (const [s, e] of spans) { if (e <= cur) continue; used += e - Math.max(s, cur); cur = e; }
@@ -268,6 +287,7 @@ function freeMinutes() {
 /** Sends a change. The answer is only taken over if nothing newer has changed the task meanwhile. */
 function save(t, patch) {
   const rev = t.rev = (t.rev || 0) + 1;
+  queueSync();
   return api('task_update', { id: t.id, patch: patch })
     .then(d => { if (t.rev === rev) Object.assign(t, d.task); })
     .catch(saveFailed);
@@ -327,18 +347,19 @@ function removeTask(t) {
   clearTimeout(noteTimers[t.id]); delete noteTimers[t.id]; open.delete(t.id);
   S.tasks = S.tasks.filter(x => x !== t); render();
   api('task_delete', { id: t.id })
-    .then(() => toast('Task deleted.', { label: 'Undo', run() { restoreTask(t); } }))
+    .then(() => { queueSync(); toast(t.repeat ? 'Deleted from this day. It still repeats on the others.' : 'Task deleted.', { label: 'Undo', run() { restoreTask(t); } }); })
     .catch(saveFailed);
 }
 
 /**
  * Undo for a delete: adds the task again where it was. If its place was taken in the
  * meantime (the slot in Today's 3, or its time on the timeline), it comes back without it.
+ * A copy of a repeating task comes back as a task of its own that does not repeat.
  */
 async function restoreTask(old) {
   try {
     const d = await api('task_add', { title: old.title, p: old.p, board: old.board });
-    const patch = { dur: old.dur, notes: old.notes || '', subs: old.subs || [] };
+    const patch = { dur: old.dur, notes: old.notes || '', subs: old.subs || [], remind: old.remind === undefined ? null : old.remind };
     if (old.where !== 'dump') {
       const same = old.day === DAY;
       const slotFree = same && !dayTasks().some(x => x.where === 'top' && x.slot === old.slot);
@@ -351,6 +372,18 @@ async function restoreTask(old) {
     await api('task_update', { id: d.task.id, patch: patch });
   } catch (err) { toast(err.message); }
   loadState();
+  queueSync();
+}
+
+/** Repeat on, off or changed: the server rewrites the days from this one on, so the board is read again. */
+async function setRepeat(t, rule) {
+  flushNotes(t);
+  try {
+    await api('task_repeat', { id: t.id, rule: rule, day: DAY, today: dayStr(new Date()) });
+    toast(rule ? 'Repeats ' + choiceName(REPEATS, rule).toLowerCase() + '. Coming days have it already.' : 'No longer repeats from this day on.');
+  } catch (err) { toast(err.message); }
+  await loadState();
+  queueSync();
 }
 
 // ---------- rendering ----------
@@ -364,7 +397,13 @@ function moreBtn(t) {
   return `<button class="more ${hasMore(t) ? 'has' : ''}" data-act="more" data-id="${t.id}" title="Subtasks and notes" aria-expanded="${open.has(t.id)}">${moreLabel(t)}</button>`;
 }
 
-/** The panel under a task: its subtasks, a box to add one, and its notes. */
+/** Small marks after a task's title: ↻ when it repeats, a bell when Google is to remind about it. */
+function marks(t) {
+  return (t.repeat ? `<span class="rep" title="Repeats: ${esc(choiceName(REPEATS, t.repeat).toLowerCase())}">↻</span>` : '')
+    + (t.remind !== null && t.remind !== undefined && t.start !== null ? `<span class="bell" title="Reminder: ${esc(choiceName(REMINDS, t.remind).toLowerCase())}">🔔</span>` : '');
+}
+
+/** The panel under a task: its subtasks, a box to add one, its notes, how it repeats and its reminder. */
 function details(t) {
   if (!open.has(t.id)) return '';
   return `<div class="details" data-details="${t.id}">
@@ -374,6 +413,12 @@ function details(t) {
       <button class="x" title="Delete subtask" data-act="sub-del" data-id="${t.id}" data-i="${i}">×</button></li>`).join('')}</ul>
     <div class="subaddrow"><input class="subadd" type="text" name="subtask" data-subadd="${t.id}" placeholder="Add a subtask…" aria-label="New subtask" autocomplete="off" enterkeyhint="done" maxlength="300"><button class="btn small" data-act="sub-add" data-id="${t.id}" title="Add the subtask">Add</button></div>
     <textarea class="notes" name="notes" data-notes="${t.id}" placeholder="Notes…" aria-label="Notes" rows="2" maxlength="5000">${esc(t.notes)}</textarea>
+    <div class="drow">
+      <label>Repeat <select name="repeat" data-repeat="${t.id}">${options(REPEATS, t.repeat || '')}</select></label>
+      <label>Remind me <select name="remind" data-remind="${t.id}"${t.start === null ? ' disabled' : ''}>${options(REMINDS, t.start === null ? null : t.remind)}</select></label>
+      ${t.start === null ? '<span class="dhint">Give the task a time first</span>' : ''}
+    </div>
+    ${t.repeat ? `<button class="link small" data-act="series-apply" data-id="${t.id}" title="Coming days get this title, time, length, subtasks, notes and reminder">Use these details from this day on</button>` : ''}
   </div>`;
 }
 
@@ -382,7 +427,7 @@ function card(t) {
   return `<div class="task"><div class="item ${t.done ? 'done' : ''}" draggable="true" data-id="${t.id}" style="border-left-color:${safeColor(p.color)}">
     <button class="check ${t.done ? 'on' : ''}" data-act="done" data-id="${t.id}" title="Done">✓</button>
     <button class="dot" style="background:${safeColor(p.color)}" title="${esc(p.name)} (click to change)" data-act="proj" data-id="${t.id}"></button>
-    <span class="t" title="${esc(t.title)} (double-click to rename)" data-title="${t.id}">${esc(t.title)}</span>
+    <span class="t" title="${esc(t.title)} (double-click to rename)" data-title="${t.id}">${esc(t.title)}${marks(t)}</span>
     ${t.carried && t.where === 'dump' ? '<span class="carried" title="Left over from an earlier day">carried</span>' : ''}
     ${t.start !== null ? `<span class="at">${hm(t.start)}</span>` : ''}
     ${moreBtn(t)}
@@ -405,7 +450,7 @@ function renderLists() {
     const p = proj(t.p);
     top += `<div class="task"><div class="slot ${t.done ? 'done' : ''}" draggable="true" data-id="${t.id}" data-slot="${i}" style="border-left-color:${safeColor(p.color)}">
       <span class="n">${i + 1}</span><div class="body"><b title="${esc(t.title)} (double-click to rename)" data-title="${t.id}">${esc(t.title)}</b>
-      <span class="meta">${esc(p.name)} · <button class="dur" data-act="dur" data-id="${t.id}">${durTxt(t.dur)}</button>${t.start !== null ? `<span class="at">${hm(t.start)}</span>` : '<span>not scheduled yet</span>'}${moreBtn(t)}</span></div>
+      <span class="meta">${esc(p.name)} · <button class="dur" data-act="dur" data-id="${t.id}">${durTxt(t.dur)}</button>${t.start !== null ? `<span class="at">${hm(t.start)}</span>` : '<span>not scheduled yet</span>'}${marks(t)}${moreBtn(t)}</span></div>
       <button class="check ${t.done ? 'on' : ''}" data-act="done" data-id="${t.id}" title="Done">✓</button></div>${details(t)}</div>`;
   }
   $('top3').innerHTML = top;
@@ -446,14 +491,16 @@ function renderTimeline() {
   const s0 = startMin();
   let h = '';
   for (let i = S.settings.dayStart; i < S.settings.dayEnd; i++) h += `<div class="hr"><i>${String(i).padStart(2, '0')}:00</i></div>`;
-  h += booked().map(b => `<div class="blk booked" title="${esc(b.title)} · ${esc(b.calendar)}" style="top:${(b.s - s0) / 60 * H + 1}px;height:${(b.e - b.s) / 60 * H - 2}px">🔒 ${esc(b.title)}<small>${hm(b.s)}–${hm(b.e)}</small></div>`).join('');
-  const lane = lanes(scheduled());
+  const google = gBlocks(), lane = lanes(scheduled().concat(google));
+  const sideOf = l => l.cols > 1 ? `left:calc(8px + (100% - 16px) * ${l.col} / ${l.cols});right:auto;width:calc((100% - 16px) / ${l.cols} - ${l.col < l.cols - 1 ? 3 : 0}px);` : '';
+  // a calendar event: its time is Google's, so it is not dragged or resized; a click opens its subtasks and notes
+  h += google.map(b => { const e = b.ev; return `<div class="blk gcal" role="button" tabindex="0" data-act="gev-open" data-day="${DAY}" data-gkey="${e.key}" title="${esc(e.title)} · ${esc(e.calendar)}" style="top:${(b.start - s0) / 60 * H + 1}px;height:${b.dur / 60 * H - 2}px;${sideOf(lane.get(b.id))}--c:${safeColor(e.color)}"><i class="gmark" aria-hidden="true"></i>${esc(e.title)}<small>${hm(e.start)}–${hm(e.end)}</small>${hasMore(e) ? `<small>${moreLabel(e)}</small>` : ''}</div>`; }).join('');
   h += scheduled().map(t => {
     const p = proj(t.p), c = safeColor(p.color), n = t.where === 'top' ? ['①', '②', '③'][t.slot] + ' ' : '';
-    const l = lane.get(t.id), side = l.cols > 1 ? `left:calc(8px + (100% - 16px) * ${l.col} / ${l.cols});right:auto;width:calc((100% - 16px) / ${l.cols} - ${l.col < l.cols - 1 ? 3 : 0}px);` : '';
+    const l = lane.get(t.id), side = sideOf(l);
     const top = Math.max(t.start, s0), end = Math.min(t.start + t.dur, endMin());
     if (end <= top) return '';
-    return `<div class="blk ${t.done ? 'done' : ''}" draggable="true" data-id="${t.id}" data-blk="1" title="${esc(t.title)}" style="top:${(top - s0) / 60 * H + 1}px;height:${(end - top) / 60 * H - 2}px;${side}background-color:${c};color:${ink(c)}">${n}${esc(t.title)}<small>${hm(t.start)}–${hm(t.start + t.dur)}</small>${hasMore(t) ? `<small>${moreLabel(t)}</small>` : ''}<button class="x" title="Take off the timeline" data-act="unschedule" data-id="${t.id}">×</button><span class="rs" data-rs="${t.id}"></span></div>`;
+    return `<div class="blk ${t.done ? 'done' : ''}" draggable="true" data-id="${t.id}" data-blk="1" title="${esc(t.title)}" style="top:${(top - s0) / 60 * H + 1}px;height:${(end - top) / 60 * H - 2}px;${side}background-color:${c};color:${ink(c)}">${n}${esc(t.title)}${marks(t)}<small>${hm(t.start)}–${hm(t.start + t.dur)}</small>${hasMore(t) ? `<small>${moreLabel(t)}</small>` : ''}<button class="x" title="Take off the timeline" data-act="unschedule" data-id="${t.id}">×</button><span class="rs" data-rs="${t.id}"></span></div>`;
   }).join('');
   const now = new Date(), nowMin = now.getHours() * 60 + now.getMinutes();
   if (DAY === dayStr(now) && nowMin >= s0 && nowMin <= endMin()) h += `<div class="now" style="top:${(nowMin - s0) / 60 * H}px"></div>`;
@@ -461,11 +508,13 @@ function renderTimeline() {
   $('tl').innerHTML = h;
   // the board's own events first (they never block the timeline), then Google's all-day events
   $('allday').innerHTML = S.events.map(dayChip).join('')
-    + CAL.allDay.map(e => `<span class="chip" title="${esc(e.calendar)}">All day: ${esc(e.title)}</span>`).join('')
+    + CAL.allDay.filter(e => !e.hidden).map(e => `<button type="button" class="chip gchip" data-act="gev-open" data-day="${DAY}" data-gkey="${e.key}" style="--c:${safeColor(e.color)}" title="${esc(e.title)} · ${esc(e.calendar)}"><span>All day: ${esc(e.title)}</span>${hasMore(e) ? `<b>${moreLabel(e)}</b>` : ''}</button>`).join('')
     + `<button class="chip add" data-act="event-new" data-day="${DAY}" title="Add an event on this day">+ Event</button>`;
-  $('tlhint').textContent = S.calendarConnected
-    ? "Striped blocks come from your calendar and can't be planned over. Your own tasks can share a time: they sit side by side."
-    : 'Tasks can share a time: they sit side by side. Your calendar is not connected yet, so booked time is not shown. Connect it in Settings (⚙).';
+  const hidden = CAL.events.concat(CAL.allDay).filter(e => e.hidden).length;
+  $('tlhint').innerHTML = esc(S.calendarConnected
+    ? 'Blocks with a calendar mark come from Google Calendar: click one for its subtasks and notes. Tasks can share a time with anything: they sit side by side.'
+    : 'Tasks can share a time: they sit side by side. Your calendar is not connected yet, so its events are not shown. Connect it in Settings (⚙).')
+    + (hidden ? ` <button class="link" data-act="gev-unhide" title="Show the calendar events you hid on this day">${hidden} hidden · show</button>` : '');
 }
 
 const subsDone = e => e.subs.filter(s => s.done).length;
@@ -477,19 +526,21 @@ function dayChip(e) {
   if (e.location) txt += ' · ' + e.location;
   if (total > 1) txt += ' · day ' + (daysBetween(e.from, DAY) + 1) + ' of ' + total;
   const n = e.subs.length;
-  return `<button type="button" class="chip own" data-act="event-open" data-ev="${e.id}" style="--c:${c}" title="${esc(txt)}"><span>${esc(txt)}</span>${n ? `<b>${subsDone(e)}/${n}</b>` : ''}</button>`;
+  return `<button type="button" class="chip own" data-act="event-open" data-ev="${e.id}" style="--c:${c}" title="${esc(txt)}"><span>${esc(txt)}</span>${e.remind !== null && e.remind !== undefined ? '<i class="bell" title="Reminder">🔔</i>' : ''}${n ? `<b>${subsDone(e)}/${n}</b>` : ''}</button>`;
 }
 
 function renderCalStatus() {
   const el = $('calstat');
   const C = PAGE === 'calendar' ? Object.assign({ loading: CP.loading }, CP.google) : CAL;
-  el.className = 'calstat' + (C.error ? ' bad' : '');
+  const problem = C.error || SYNC.error;            // a failed sync is told here, quietly, not in a toast each time
+  el.className = 'calstat' + (problem ? ' bad' : '');
   if (!S.calendarConnected) { el.innerHTML = '<button class="btn go" data-act="settings-open">Connect Google Calendar</button>'; return; }
   let txt = 'Calendar';
   if (C.loading) txt = 'Reading calendar…';
-  else if (C.error) txt = 'Calendar problem';
+  else if (problem) txt = 'Calendar problem';
+  else if (SYNC.running) txt = 'Updating Google Calendar…';
   else if (C.fetchedAt) { const d = new Date(C.fetchedAt * 1000); txt = 'Calendar read ' + hm(d.getHours() * 60 + d.getMinutes()); }
-  el.innerHTML = `<span title="${esc(C.error || '')}">${esc(txt)}</span><button class="btn small" data-act="refresh-cal" title="Read the calendar again" aria-label="Read the calendar again">↻</button>`;
+  el.innerHTML = `<span title="${esc(problem || '')}">${esc(txt)}</span><button class="btn small" data-act="refresh-cal" title="Read the calendar again" aria-label="Read the calendar again">↻</button>`;
 }
 
 /** "November 2026", or the week: "23–29 November" (in the browser's own words for dates). */
@@ -502,7 +553,7 @@ function calTitle() {
 function renderHeader() {
   const cal = PAGE === 'calendar', unit = cal ? VIEW : 'day';
   $('free').hidden = cal;
-  $('push').hidden = cal || !S.calendarConnected;
+  $('push').hidden = !S.calendarConnected;
   [['prev', 'Previous '], ['next', 'Next ']].forEach(([id, w]) => { $(id).title = w + unit; $(id).setAttribute('aria-label', w + unit); });
   if (cal) { $('dayname').textContent = calTitle(); $('daydate').textContent = ''; renderCalStatus(); return; }
   const d = dayDate(DAY), today = dayStr(new Date());
@@ -528,10 +579,10 @@ const MONTH_ITEMS = 3;          // items in a month cell before "+N more"
 
 /** What one day holds: the board's events, Google's events and the board's planned tasks. */
 function dayItems(day) {
-  const days = (CP.google && CP.google.days) || {};
+  const days = (CP.google && CP.google.days) || {}, g = days[day] || { events: [], allDay: [] };
   return {
     own: CP.events.filter(e => e.from <= day && e.to >= day),
-    g: days[day] || { events: [], allDay: [] },
+    g: { events: g.events.filter(e => !e.hidden), allDay: g.allDay.filter(e => !e.hidden) },
     tasks: CP.tasks.filter(t => t.day === day),
   };
 }
@@ -543,7 +594,7 @@ function evChip(e, day, big) {
   const when = e.from === e.to ? time : e.from + ' – ' + e.to;
   const tip = e.title + (e.location ? ' · ' + e.location : '') + (when ? ' · ' + when : '') + (n ? ' · to arrange ' + subsDone(e) + '/' + n : '');
   const cls = 'ev' + (day === e.from ? '' : ' cont-l') + (day === e.to ? '' : ' cont-r') + (big ? ' big' : '');
-  let inner = (e.start !== null ? `<b>${hm(e.start)}</b> ` : '') + esc(e.title);
+  let inner = (e.start !== null ? `<b>${hm(e.start)}</b> ` : '') + esc(e.title) + (e.remind !== null && e.remind !== undefined ? ' <i class="bell">🔔</i>' : '');
   if (big) {
     if (e.start !== null) inner = `<b>${time}</b> ` + esc(e.title);
     if (e.location) inner += `<small>${esc(e.location)}</small>`;
@@ -552,8 +603,9 @@ function evChip(e, day, big) {
   return `<div class="${cls}" role="button" tabindex="0" draggable="true" data-act="event-open" data-ev="${e.id}" data-day="${day}" title="${esc(tip)}" style="background-color:${c};color:${ink(c)}">${inner}</div>`;
 }
 
-const gAllDay = x => `<div class="gev" title="${esc(x.title)} · ${esc(x.calendar)}">${esc(x.title)}</div>`;
-const gTimed = x => `<div class="gev" title="${esc(x.title)} · ${esc(x.calendar)}"><b>${hm(x.start)}</b> ${esc(x.title)}</div>`;
+const gAttrs = (x, day) => `class="gev" role="button" tabindex="0" data-act="gev-open" data-day="${day}" data-gkey="${x.key}" title="${esc(x.title)} · ${esc(x.calendar)}" style="--c:${safeColor(x.color)}"`;
+const gAllDay = (x, day) => `<div ${gAttrs(x, day)}>${esc(x.title)}</div>`;
+const gTimed = (x, day) => `<div ${gAttrs(x, day)}><b>${hm(x.start)}</b> ${esc(x.title)}</div>`;
 
 /** The board's planned tasks of a day, in one line: a dot per filled place in Today's 3, then the count. */
 function taskLine(day, tasks) {
@@ -567,7 +619,7 @@ function taskLine(day, tasks) {
 
 function monthCell(day) {
   const it = dayItems(day), d = dayDate(day), today = dayStr(new Date());
-  const items = it.own.map(e => evChip(e, day)).concat(it.g.allDay.map(gAllDay), it.g.events.map(gTimed));
+  const items = it.own.map(e => evChip(e, day)).concat(it.g.allDay.map(x => gAllDay(x, day)), it.g.events.map(x => gTimed(x, day)));
   if (it.tasks.length) items.push(taskLine(day, it.tasks));
   const max = narrow() ? 12 : MONTH_ITEMS;             // on a phone they are dots, and many fit
   const shown = items.length > max ? items.slice(0, max) : items, more = items.length - shown.length;
@@ -581,9 +633,9 @@ function weekCard(day) {
   const it = dayItems(day), d = dayDate(day), today = dayStr(new Date());
   const tasks = it.tasks.map(t => {
     const c = safeColor(proj(t.p).color);
-    return `<div class="wtask${t.done ? ' done' : ''}"><i style="background:${c}"></i><span title="${esc(t.title)}">${t.where === 'top' ? `<b>${t.slot + 1}</b> ` : ''}${esc(t.title)}${t.start !== null ? `<small>${hm(t.start)}</small>` : ''}</span></div>`;
+    return `<div class="wtask${t.done ? ' done' : ''}"><i style="background:${c}"></i><span title="${esc(t.title)}">${t.where === 'top' ? `<b>${t.slot + 1}</b> ` : ''}${esc(t.title)}${t.repeat ? ' <em class="rep">↻</em>' : ''}${t.start !== null ? `<small>${hm(t.start)}</small>` : ''}</span></div>`;
   });
-  const google = it.g.allDay.map(gAllDay).concat(it.g.events.map(gTimed));
+  const google = it.g.allDay.map(x => gAllDay(x, day)).concat(it.g.events.map(x => gTimed(x, day)));
   return `<div class="wday${day === today ? ' today' : ''}" data-cday="${day}">
     <div class="whead"><button class="dnum" data-act="open-day" data-day="${day}" title="Open this day">${d.getDate()}</button><span>${esc(d.toLocaleDateString(undefined, { weekday: 'long' }))}</span></div>
     ${it.own.map(e => evChip(e, day, true)).join('')}${google.join('')}
@@ -598,8 +650,8 @@ function renderCalendar() {
   document.querySelectorAll('#views [data-view]').forEach(b => { b.classList.toggle('on', b.dataset.view === VIEW); b.setAttribute('aria-pressed', b.dataset.view === VIEW); });
   const G = CP.google || {};
   const note = $('cal-note');
-  note.hidden = !(S.calendarConnected && G.needsUpdate);
-  if (!note.hidden) note.innerHTML = 'To see Google Calendar events here, update the calendar script: <button class="link" data-act="settings-update">Settings › Google Calendar</button>.';
+  note.hidden = !(S.calendarConnected && (G.needsUpdate || (S.sync && S.sync.needsUpdate)));
+  if (!note.hidden) note.innerHTML = 'Update the calendar script to get Google events on this page, reminders and one Google calendar per board: <button class="link" data-act="settings-update">Settings › Google Calendar</button>.';
   $('cal-hint').textContent = narrow() && VIEW === 'month' ? 'Tap a day to see its week.' : 'Click a day to add an event; drag an event to move it.';
   const r = calRange(), days = [];
   for (let d = r.from; d <= r.to; d = shiftDay(d, 1)) days.push(d);
@@ -642,7 +694,7 @@ function renderUpcoming() {
       : '';
     return `<div class="up-row" style="--c:${c}">
       <div class="up-top"><span class="up-date">${esc(whenTxt(e))}</span><span class="up-when${soon ? ' soon' : ''}">${when}</span></div>
-      <button class="up-title" data-act="event-open" data-ev="${e.id}" title="${esc(e.title)}">${esc(e.title)}</button>
+      <button class="up-title" data-act="event-open" data-ev="${e.id}" title="${esc(e.title)}">${esc(e.title)}${e.remind !== null && e.remind !== undefined ? ' <i class="bell">🔔</i>' : ''}</button>
       ${e.location ? `<div class="up-loc" title="${esc(e.location)}">${esc(e.location)}</div>` : ''}${prog}${todo}</div>`;
   }).join('');
 }
@@ -663,8 +715,73 @@ function moveEvent(id, from) {
   const patch = { from: from, to: shiftDay(from, daysBetween(e.from, e.to)) };
   setEventLocal(id, patch);
   api('event_update', { id: id, patch: patch })
-    .then(() => loadUpcoming())
+    .then(() => { loadUpcoming(); queueSync(); })
     .catch(err => { toast(err.message); refreshEvents(); });
+}
+
+// ---------- Google Calendar events: subtasks, notes, hiding ----------
+/** The same Google event can be in the day's list and in the Calendar page's days. */
+function gLists(day) {
+  const lists = day === DAY ? [CAL.events, CAL.allDay] : [];
+  const d = CP.google && CP.google.days && CP.google.days[day];
+  if (d) lists.push(d.events, d.allDay);
+  return lists;
+}
+const findG = (day, key) => { for (const l of gLists(day)) { const e = l.find(x => x.key === key); if (e) return e; } return null; };
+function setGLocal(day, key, patch) { gLists(day).forEach(l => l.forEach(e => { if (e.key === key) Object.assign(e, patch); })); }
+
+/** Saves notes, subtasks or "hidden" for a Google event; the planner keeps them, Google is not changed. */
+function gevSave(day, key, patch) {
+  setGLocal(day, key, patch);
+  render();
+  return api('cal_extra', { day: day, key: key, patch: patch }).catch(err => { toast(err.message); loadCalendar(false); });
+}
+
+function openGev(day, key) {
+  const e = findG(day, key);
+  if (!e) return;
+  GE = { day: day, key: key, timer: 0 };
+  const allDay = e.start === undefined;
+  $('gev-title').textContent = e.title;
+  $('gev-when').textContent = [allDay ? 'All day' : hm(e.start) + '–' + hm(e.end),
+    dayDate(day).toLocaleDateString(undefined, { weekday: 'long', day: 'numeric', month: 'long' }), e.calendar].filter(Boolean).join(' · ');
+  $('gev-notes').value = e.notes || '';
+  $('gev-subadd').value = '';
+  renderGevSubs();
+  $('gev-dlg').showModal();
+}
+
+function renderGevSubs() {
+  const e = GE && findG(GE.day, GE.key);
+  $('gev-subs').innerHTML = (e ? e.subs : []).map((s, i) => `<li class="${s.done ? 'done' : ''}">
+    <button type="button" class="check ${s.done ? 'on' : ''}" data-act="gev-sub-done" data-i="${i}" title="Done">✓</button>
+    <span data-gevsub="${i}" title="Double-click to rename">${esc(s.title)}</span>
+    <button type="button" class="x" data-act="gev-sub-del" data-i="${i}" title="Delete subtask">×</button></li>`).join('');
+}
+
+function gevSubs(change) {
+  const e = GE && findG(GE.day, GE.key);
+  if (!e) return;
+  const subs = e.subs.map(s => ({ title: s.title, done: s.done }));
+  change(subs);
+  gevSave(GE.day, GE.key, { subs: subs });
+  renderGevSubs();
+}
+
+function addGevSub() {
+  const box = $('gev-subadd'), v = box.value.trim().replace(/\s+/g, ' '), e = GE && findG(GE.day, GE.key);
+  if (!v || !e) { box.focus(); return; }
+  if (e.subs.length >= 50) { toast('An event holds up to 50 subtasks.'); return; }
+  box.value = '';
+  gevSubs(subs => subs.push({ title: v, done: false }));
+  box.focus();
+}
+
+function flushGevNotes() {
+  if (!GE || !GE.timer) return;
+  clearTimeout(GE.timer);
+  GE.timer = 0;
+  gevSave(GE.day, GE.key, { notes: $('gev-notes').value });
 }
 
 // ---------- clicks ----------
@@ -698,9 +815,33 @@ const actions = {
     const subs = e.subs.map((s, k) => k === i ? { title: s.title, done: true } : s);
     setEventLocal(e.id, { subs: subs });
     render();
-    api('event_update', { id: e.id, patch: { subs: subs } }).catch(err => { toast(err.message); refreshEvents(); });
+    api('event_update', { id: e.id, patch: { subs: subs } }).then(queueSync).catch(err => { toast(err.message); refreshEvents(); });
   },
   'settings-update'() { openSettings(); $('cal-update').open = true; },
+  'gev-open'(_, el) { openGev(el.dataset.day, el.dataset.gkey); },
+  'gev-close'() { $('gev-dlg').close(); },
+  'gev-sub-add'() { addGevSub(); },
+  'gev-sub-done'(_, btn) { const i = +btn.dataset.i; gevSubs(subs => { if (subs[i]) subs[i].done = !subs[i].done; }); },
+  'gev-sub-del'(_, btn) { const i = +btn.dataset.i; gevSubs(subs => subs.splice(i, 1)); },
+  'gev-hide'() {
+    const g = GE;
+    flushGevNotes();
+    $('gev-dlg').close();
+    gevSave(g.day, g.key, { hidden: true });
+    toast('Hidden from the planner. It stays in Google Calendar.', { label: 'Undo', run() { gevSave(g.day, g.key, { hidden: false }); } });
+  },
+  'gev-unhide'() {
+    CAL.events.concat(CAL.allDay).filter(e => e.hidden).forEach(e => gevSave(DAY, e.key, { hidden: false }));
+  },
+  async 'series-apply'(t) {
+    flushNotes(t);
+    try {
+      await api('series_apply', { id: t.id });
+      toast('From this day on, it repeats with these details.');
+    } catch (err) { toast(err.message); }
+    await loadState();
+    queueSync();
+  },
   async 'add-board'() {
     try {
       const d = await api('board_add', { name: 'New board' });
@@ -744,10 +885,22 @@ const actions = {
   'refresh-cal'() { if (PAGE === 'calendar') loadMonth(true); else loadCalendar(true); },
   async push(_, btn) {
     if (!S.calendarConnected) { openSettings(); toast('Connect your calendar first.'); return; }
+    if (SYNC.running) { toast('Google Calendar is being brought up to date. One moment.'); return; }
     btn.disabled = true;
     try {
-      const r = await api('calendar_push', { day: DAY });
-      toast(r.created ? r.created + ' block' + (r.created === 1 ? '' : 's') + ' sent to your Planner calendar.' : 'Nothing is on the timeline; the Planner calendar is clear for this day.');
+      const r = await runSync(true);
+      if (r && r.needsUpdate) {
+        // an older script: send the day the old way, and say how to get the rest
+        const old = await api('calendar_push', { day: DAY });
+        toast((old.created ? old.created + ' block' + (old.created === 1 ? '' : 's') + ' sent to your Planner calendar.' : 'Nothing is on the timeline; the Planner calendar is clear for this day.')
+          + ' For reminders and one calendar per board, update the calendar script: Settings › Google Calendar.');
+        render();
+      } else if (r && r.busy) {
+        toast('Google Calendar is busy with another update. It is tried again in half a minute.');
+      } else if (r) {
+        toast('Google Calendar is up to date: ' + r.created + ' added, ' + r.updated + ' changed, ' + r.removed + ' removed.'
+          + (r.partial ? ' There is more to send: press the button again in a minute.' : ''));
+      }
     } catch (err) { toast(err.message); }
     btn.disabled = false;
   },
@@ -825,6 +978,38 @@ document.addEventListener('click', e => {
   fn(t, el);
 });
 
+// ---------- keeping Google Calendar up to date ----------
+/** Something that Google shows changed: send everything a few seconds after the last change. */
+function queueSync() {
+  const sy = S.sync || {};
+  if (!S.calendarConnected || !sy.auto || sy.needsUpdate) return;
+  clearTimeout(SYNC.timer);
+  SYNC.timer = setTimeout(() => runSync(false), sy.delay || 8000);
+}
+
+/** One sync at a time. A manual one (the button) passes its error on; an automatic one only shows it in the status. */
+async function runSync(manual) {
+  if (SYNC.running) { SYNC.again = true; return null; }
+  clearTimeout(SYNC.timer);
+  SYNC.running = true;
+  renderCalStatus();
+  let r = null, failed = null;
+  try {
+    r = await api('calendar_sync', { today: dayStr(new Date()) });
+    S.sync = r.sync;
+    SYNC.error = '';
+  } catch (err) { failed = err; SYNC.error = err.message; }
+  SYNC.running = false;
+  if (r && r.busy) {
+    // the script is busy with another update (another tab or device): quietly try again in half a minute
+    clearTimeout(SYNC.timer);
+    SYNC.timer = setTimeout(() => runSync(false), 30000);
+  } else if (SYNC.again) { SYNC.again = false; queueSync(); }
+  renderCalStatus();
+  if (failed && manual) throw failed;
+  return r;
+}
+
 // subtasks and notes
 function addSub(t, box) {
   const v = box.value.trim();
@@ -876,6 +1061,7 @@ function openEvent(e, day) {
   $('ev-proj').innerHTML = '<option value="">No project</option>' + S.projects.map(p => `<option value="${p.id}">${esc(p.name)}</option>`).join('');
   $('ev-proj').value = e && S.projects.some(p => p.id === e.p) ? String(e.p) : '';
   $('ev-notes').value = e ? e.notes : '';
+  $('ev-remind').dataset.value = e && e.remind !== null && e.remind !== undefined ? String(e.remind) : '';
   $('ev-subadd').value = '';
   $('ev-del').hidden = !e;
   $('ev-error').hidden = true;
@@ -886,12 +1072,15 @@ function openEvent(e, day) {
   if (!e) $('ev-title').focus();
 }
 
-/** A timed event lasts one day, so its end date follows the start date. */
+/** A timed event lasts one day, so its end date follows the start date. Its reminders are other ones than an all-day event's. */
 function syncEventTimes() {
-  const timed = !$('ev-allday').checked;
+  const timed = !$('ev-allday').checked, sel = $('ev-remind'), list = timed ? REMINDS : ALLDAY_REMINDS;
   $('ev-times').hidden = !timed;
   if (timed || !$('ev-to').value || $('ev-to').value < $('ev-from').value) $('ev-to').value = $('ev-from').value;
   $('ev-to').disabled = timed;
+  const keep = sel.dataset.value === '' ? null : +sel.dataset.value;
+  sel.innerHTML = options(list, list.some(c => c[0] === keep) ? keep : null);
+  sel.dataset.value = sel.value;
 }
 
 function renderEventSubs() {
@@ -921,7 +1110,8 @@ function readEvent() {
   const from = $('ev-from').value, timed = !$('ev-allday').checked;
   const to = timed ? from : $('ev-to').value || from;
   const body = { title: title, from: from, to: to, start: null, end: null, location: $('ev-loc').value.trim(),
-                 p: $('ev-proj').value ? +$('ev-proj').value : null, notes: $('ev-notes').value, subs: EV.subs };
+                 p: $('ev-proj').value ? +$('ev-proj').value : null, notes: $('ev-notes').value, subs: EV.subs,
+                 remind: $('ev-remind').value === '' ? null : +$('ev-remind').value };
   if (!title) return { error: 'An event needs a title' };
   if (!/^\d{4}-\d{2}-\d{2}$/.test(from) || !/^\d{4}-\d{2}-\d{2}$/.test(to)) return { error: 'Pick the days of the event' };
   const len = daysBetween(from, to);
@@ -948,6 +1138,7 @@ async function saveEvent() {
     else await api('event_add', Object.assign({ board: BOARD }, r.body));
     $('event-dlg').close();
     refreshEvents();
+    queueSync();
   } catch (err) { eventError(err.message); }
   $('ev-save').disabled = false;
 }
@@ -959,7 +1150,7 @@ function deleteEvent() {
   removeEventLocal(e.id);
   render();
   api('event_delete', { id: e.id })
-    .then(() => toast('Event deleted.', { label: 'Undo', run() { restoreEvent(e); } }))
+    .then(() => { queueSync(); toast('Event deleted.', { label: 'Undo', run() { restoreEvent(e); } }); })
     .catch(err => { toast(err.message); refreshEvents(); });
 }
 
@@ -967,12 +1158,14 @@ function deleteEvent() {
 async function restoreEvent(old) {
   try {
     await api('event_add', { board: old.board, title: old.title, from: old.from, to: old.to, start: old.start, end: old.end,
-                             location: old.location, p: old.p, notes: old.notes, subs: old.subs });
+                             location: old.location, p: old.p, notes: old.notes, subs: old.subs, remind: old.remind });
   } catch (err) { toast(err.message); }
   refreshEvents();
+  queueSync();
 }
 
 $('ev-allday').addEventListener('change', syncEventTimes);
+$('ev-remind').addEventListener('change', e => { e.target.dataset.value = e.target.value; });
 $('ev-from').addEventListener('change', syncEventTimes);
 $('ev-subadd').addEventListener('keydown', e => {
   if (e.key !== 'Enter') return;
@@ -1004,6 +1197,37 @@ $('ev-subs').addEventListener('dblclick', e => {
 // a click on the dimmed area around the dialog closes it without saving
 $('event-dlg').addEventListener('click', e => { if (e.target === e.currentTarget) e.currentTarget.close(); });
 
+// the Google event dialog saves as it goes: subtasks at once, notes a moment after the last keystroke
+$('gev-dlg').addEventListener('click', e => { if (e.target === e.currentTarget) e.currentTarget.close(); });
+$('gev-dlg').addEventListener('close', () => { flushGevNotes(); GE = null; });
+$('gev-notes').addEventListener('input', () => {
+  if (!GE) return;
+  clearTimeout(GE.timer);
+  GE.timer = setTimeout(flushGevNotes, 700);
+});
+$('gev-subadd').addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); addGevSub(); } });
+$('gev-subs').addEventListener('dblclick', e => {
+  const el = e.target.closest('[data-gevsub]'), g = GE && findG(GE.day, GE.key), i = el ? +el.dataset.gevsub : -1;
+  if (!g || !g.subs[i]) return;
+  const inp = document.createElement('input');
+  inp.className = 'edit'; inp.type = 'text'; inp.name = 'rename'; inp.autocomplete = 'off'; inp.maxLength = 300;
+  inp.value = g.subs[i].title;
+  el.replaceWith(inp); inp.focus(); inp.select();
+  let finished = false;
+  const finish = keep => {
+    if (finished) return;
+    finished = true;
+    const v = inp.value.trim().replace(/\s+/g, ' ');
+    if (keep && v && v !== g.subs[i].title) gevSubs(subs => { subs[i].title = v; });
+    else renderGevSubs();
+  };
+  inp.addEventListener('keydown', ev => {
+    if (ev.key === 'Enter') { ev.preventDefault(); finish(true); }
+    if (ev.key === 'Escape') { ev.preventDefault(); finish(false); }
+  });
+  inp.addEventListener('blur', () => finish(true));
+});
+
 // a click on the free part of a day on the calendar: a new event there (on a phone, that day's week)
 $('cal-grid').addEventListener('click', e => {
   const c = e.target.closest('[data-cday]');
@@ -1018,7 +1242,7 @@ $('cal-grid').addEventListener('click', e => {
   openEvent(null, c.dataset.cday);
 });
 
-// ---------- events: drag to another day on the calendar (mouse) ----------
+// ---------- events: drag to another day on the calendar (mouse here; a finger through the touch handlers below) ----------
 document.addEventListener('dragstart', e => {
   if (touch) return;
   const el = e.target.closest && e.target.closest('[data-ev][draggable="true"]');
@@ -1029,18 +1253,24 @@ document.addEventListener('dragstart', e => {
   e.dataTransfer.setData('text/plain', 'event');
   setTimeout(() => el.classList.add('dragging'), 0);
 });
-document.addEventListener('dragover', e => {
-  if (!evDrag) return;
+/** Marks the day under the pointer or finger. Returns true when the dragged event can be dropped there. */
+function evMove(target) {
   document.querySelectorAll('[data-cday].over').forEach(x => x.classList.remove('over'));
-  const c = e.target.closest && e.target.closest('[data-cday]');
-  if (c) { c.classList.add('over'); e.preventDefault(); }
+  const c = target && target.closest && target.closest('[data-cday]');
+  if (c) c.classList.add('over');
+  return !!c;
+}
+function evDrop(target) {
+  const c = target && target.closest && target.closest('[data-cday]');
+  if (c) moveEvent(evDrag.id, shiftDay(c.dataset.cday, -evDrag.off));   // the grabbed day lands where it was let go
+}
+document.addEventListener('dragover', e => {
+  if (evDrag && evMove(e.target)) e.preventDefault();
 });
 document.addEventListener('drop', e => {
-  if (!evDrag) return;
-  const c = e.target.closest && e.target.closest('[data-cday]');
-  if (!c) return;
+  if (!evDrag || !(e.target.closest && e.target.closest('[data-cday]'))) return;
   e.preventDefault();
-  moveEvent(evDrag.id, shiftDay(c.dataset.cday, -evDrag.off));   // the grabbed day lands where it was let go
+  evDrop(e.target);
 });
 document.addEventListener('dragend', () => {
   if (!evDrag) return;
@@ -1085,6 +1315,13 @@ function addFromBox() {
   box.focus();
 }
 
+// how a task repeats, and its reminder
+document.addEventListener('change', e => {
+  const ds = e.target.dataset || {};
+  if (ds.repeat && task(+ds.repeat)) setRepeat(task(+ds.repeat), e.target.value);
+  if (ds.remind && task(+ds.remind)) update(task(+ds.remind), { remind: e.target.value === '' ? null : +e.target.value });
+});
+
 // project color and name
 document.addEventListener('input', e => {
   const id = e.target.dataset && e.target.dataset.pcolor;
@@ -1100,7 +1337,7 @@ document.addEventListener('change', e => {
     if (!b) return;
     if (!name) { e.target.value = b.name; return; }
     b.name = name;
-    api('board_update', { id: b.id, name: name }).then(d => { S.boards = d.boards; renderBoards(); }).catch(saveFailed);
+    api('board_update', { id: b.id, name: name }).then(d => { S.boards = d.boards; renderBoards(); queueSync(); }).catch(saveFailed);
     renderBoards();
   }
   if (ds.pname) {
@@ -1257,8 +1494,10 @@ function touchEnd(drop) {
   document.body.classList.remove('touch-dragging');
   const under = document.elementFromPoint(was.x, was.y);
   if (drop && subDrag) subDrop(under, was.y);
-  else if (drop && task(drag.id)) dragDrop(under, was.y);
-  drag = null; subDrag = null;
+  else if (drop && evDrag) evDrop(under);
+  else if (drop && drag && task(drag.id)) dragDrop(under, was.y);
+  document.querySelectorAll('[data-cday].over').forEach(x => x.classList.remove('over'));
+  drag = null; subDrag = null; evDrag = null;
   render();
 }
 
@@ -1266,10 +1505,11 @@ function touchLift() {
   const el = touch.el, r = el.getBoundingClientRect();
   touch.active = true;
   if (el.dataset.subrow) subDrag = { id: +el.dataset.subrow, i: +el.dataset.i };
+  else if (el.dataset.ev) { const ev = findEvent(+el.dataset.ev); evDrag = { id: ev.id, off: daysBetween(ev.from, el.dataset.day) }; }
   else drag = { id: +el.dataset.id, off: el.dataset.blk ? Math.round((touch.y - r.top) / H * 60) : 0 };
   const c = el.cloneNode(true);
   c.classList.add('drag-clone');
-  c.removeAttribute('data-id');
+  c.removeAttribute('data-id'); c.removeAttribute('data-ev'); c.removeAttribute('data-act');
   c.style.width = r.width + 'px';
   c.style.height = r.height + 'px';
   touch.dx = touch.x - r.left; touch.dy = touch.y - r.top;
@@ -1284,15 +1524,18 @@ function touchLift() {
     const step = touch.y < EDGE ? -14 : touch.y > innerHeight - EDGE ? 14 : 0;
     if (!step) return;
     scrollBy(0, step);
-    (subDrag ? subMove : dragMove)(document.elementFromPoint(touch.x, touch.y), touch.y);
+    const under = document.elementFromPoint(touch.x, touch.y);
+    if (evDrag) evMove(under); else (subDrag ? subMove : dragMove)(under, touch.y);
   }, 16);
 }
 
 document.addEventListener('touchstart', e => {
   if (touch) { touchEnd(false); return; }          // a second finger cancels
-  if (e.touches.length !== 1 || editing || drag || subDrag) return;
-  const el = e.target.closest('[data-id][draggable="true"], [data-subrow]');
+  if (e.touches.length !== 1 || editing || drag || subDrag || evDrag) return;
+  const el = e.target.closest('[data-id][draggable="true"], [data-subrow], [data-ev][draggable="true"]');
   if (!el || e.target.closest('button, input, [data-rs]')) return;   // buttons keep their tap
+  // in a phone's month view events are dots, and a tap shows the week: nothing to drag there
+  if (el.dataset.ev && (!findEvent(+el.dataset.ev) || (VIEW === 'month' && narrow()))) return;
   const p = e.touches[0];
   touch = { el: el, x: p.clientX, y: p.clientY, active: false, timer: setTimeout(touchLift, HOLD_MS) };
 }, { passive: true });
@@ -1310,6 +1553,7 @@ document.addEventListener('touchmove', e => {
   touch.clone.style.top = (p.clientY - touch.dy) + 'px';
   const under = document.elementFromPoint(p.clientX, p.clientY);
   if (subDrag) { subMove(under, p.clientY); return; }
+  if (evDrag) { evMove(under); return; }
   touch.clone.classList.toggle('faint', !!(under && under.closest('#tl')));   // keep the landing time readable
   dragMove(under, p.clientY);
 }, { passive: false });
@@ -1367,13 +1611,18 @@ document.addEventListener('touchstart', e => {
 function showCalState(calendars) {
   const on = S.calendarConnected;
   $('cal-state').textContent = on
-    ? '✓ Connected.' + (calendars && calendars.length ? ' Reading: ' + calendars.join(', ') + '.' : '') + ' “Send to calendar” puts your time blocks in a Google calendar named “Planner”.'
+    ? '✓ Connected.' + (calendars && calendars.length ? ' Reading: ' + calendars.join(', ') + '.' : '')
     : '';
   $('cal-state').hidden = !on;
   $('cal-setup').hidden = on;
   $('cal-on').hidden = !on;
   // a script pasted before the Calendar page existed cannot read a whole month: say so, and show how to update it
-  const old = on && !!(CP.google && CP.google.needsUpdate);
+  const sy = S.sync || {};
+  const old = on && !!((CP.google && CP.google.needsUpdate) || sy.needsUpdate);
+  $('auto-sync').checked = !!sy.auto;
+  const l = sy.last;
+  $('sync-last').textContent = l ? 'Last brought up to date ' + new Date(l.at * 1000).toLocaleString(undefined, { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })
+    + ': ' + l.created + ' added, ' + l.updated + ' changed, ' + l.removed + ' removed.' : 'Not brought up to date yet.';
   $('cal-old').hidden = !old;
   if (old) $('cal-update').open = true;
 }
@@ -1402,6 +1651,13 @@ function openSettings() {
 
 // a click on the dimmed area around the settings closes them
 $('settings').addEventListener('click', e => { if (e.target === e.currentTarget) e.currentTarget.close(); });
+$('auto-sync').addEventListener('change', async e => {
+  try {
+    const d = await api('auto_sync', { on: e.target.checked });
+    S.sync = d.sync;
+    if (S.sync.auto) runSync(false);
+  } catch (err) { toast(err.message); e.target.checked = !e.target.checked; }
+});
 
 // ---------- start ----------
 showPage();
@@ -1413,7 +1669,7 @@ setInterval(() => {                         // keeps the "now" line moving, and 
 }, 60000);
 document.addEventListener('visibilitychange', () => {                              // new day or stale tab: reload
   const a = document.activeElement;
-  if (document.hidden || drag || subDrag || evDrag || editing || $('event-dlg').open || (a && a.matches('.subadd, .notes'))) return;
+  if (document.hidden || drag || subDrag || evDrag || editing || $('event-dlg').open || $('gev-dlg').open || (a && a.matches('.subadd, .notes'))) return;
   startDay();
 });
 // the month grid shows dots instead of titles on a narrow screen

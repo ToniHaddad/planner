@@ -13,7 +13,7 @@
 </p>
 
 <p align="center">
-  <img src="docs/img/board-dark.png" alt="The planner board in its dark look: brain dump on the left, today's three main tasks in the middle with one task's subtasks and notes open, and the day's timeline on the right with calendar events shown as locked, striped blocks" width="100%">
+  <img src="docs/img/board-dark.png" alt="The planner board in its dark look: brain dump on the left, today's three main tasks in the middle with one task's subtasks and notes open, and the day's timeline on the right with Google Calendar events and tasks side by side" width="100%">
 </p>
 <p align="center"><sub>Dark is the standard look. The sun button in the top bar switches to light:</sub></p>
 <p align="center">
@@ -26,15 +26,17 @@ You plan a day in three moves, left to right:
 
 1. **Brain dump.** Type everything on your mind and press Enter. Don't sort yet.
 2. **Today's 3.** Drag the three tasks that matter most into the numbered slots. Smaller ones go to "Also today".
-3. **Timebox.** Drag tasks onto the timeline. Events from your calendar are striped, locked blocks, so you can only plan the time you really have.
+3. **Timebox.** Drag tasks onto the timeline. Events from your calendar are there too, so you see the time you really have; a task can sit beside one.
 
 What you don't finish goes back to the brain dump the next day, marked "carried", so nothing is lost and nothing piles up on a date that has passed.
 
 ## What you get
 
 - **One page, no setup.** Start it and the board is there. No sign-up and no sign-in on your own computer.
-- **Your real day.** Google Calendar events appear on the timeline and can't be planned over. The header shows how much time is still free.
-- **Time blocks back to your calendar.** One button writes the day's blocks to a separate Google calendar named "Planner". Run it again and it replaces them, never duplicates.
+- **Your real day.** Google Calendar events appear on the timeline. Give one subtasks and notes, hide the ones you don't need, or plan a task beside it. The header shows how much time is still free.
+- **Your plan in Google Calendar, one calendar per board.** Planned times and events go into a Google calendar of their own for each board ("Planner Main", "Planner Studio"…), kept up to date by themselves a few seconds after a change. Nothing is ever duplicated.
+- **Reminders.** Pick "15 minutes before" or "The day before at 09:00" and Google Calendar reminds you on your phone and computer.
+- **Repeating tasks.** Every day, weekdays, every week or every month. Each day has its own copy, ready in advance; a missed one comes back in the brain dump.
 - **Projects in color.** Give each project a color; blocks and dots take it everywhere.
 - **Drag and drop, 15-minute snap, resize from the bottom edge, undo on delete.**
 - **Subtasks and notes.** The ⋯ on a task opens a checklist and a notes box under it.
@@ -112,7 +114,7 @@ If you need a direct connection to another calendar, or something else the plann
 | Change days | The arrows and the Today button, top left. You can plan tomorrow in advance |
 | Project colors | Bottom left: click a color to change it everywhere; rename, add or delete projects |
 | Day hours | Settings: choose when your day starts and ends |
-| Put the plan in your calendar | **Send to calendar** (appears once a calendar is connected) |
+| Put the plan in your calendar | It happens by itself once a calendar is connected; **Send to calendar** does it now |
 
 On a phone or tablet, press and hold a task for a moment, then drag it. Holding it near the top or bottom edge scrolls the page, so you can carry a task from the brain dump down to the timeline.
 

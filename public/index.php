@@ -69,7 +69,7 @@ $theme = ($_COOKIE['planner_theme'] ?? '') === 'light' ? 'light' : 'dark';   // 
       <span class="pill" id="free"></span>
       <span class="sp"></span>
       <span class="calstat" id="calstat"></span>
-      <button class="btn go" id="push" data-act="push" title="Put today's time blocks in your Google calendar named Planner" hidden>Send to calendar</button>
+      <button class="btn go" id="push" data-act="push" title="Bring your planned times and events into Google Calendar now, one calendar per board" hidden>Send to calendar</button>
       <button class="btn icon" id="theme" data-act="theme" title="Switch between dark and light" aria-label="Switch between dark and light"><?= $theme === 'light' ? '☾' : '☀' ?></button>
       <button class="btn icon" data-act="settings-open" title="Settings" aria-label="Settings">⚙</button>
     </div>
@@ -96,7 +96,7 @@ $theme = ($_COOKIE['planner_theme'] ?? '') === 'light' ? 'light' : 'dark';   // 
       </div>
       <div class="col c3">
         <h2 class="h"><span class="num">3</span>Timebox</h2>
-        <p class="hint" id="tlhint">Striped blocks come from your calendar and can't be planned over. Your own tasks can share a time: they sit side by side.</p>
+        <p class="hint" id="tlhint">Tasks can share a time with anything: they sit side by side.</p>
         <div class="allday" id="allday"></div>
         <div class="tl" id="tl"></div>
       </div>
@@ -139,7 +139,10 @@ $theme = ($_COOKIE['planner_theme'] ?? '') === 'light' ? 'light' : 'dark';   // 
         <label class="fld">Ends<input id="ev-end" name="event-end" type="time" step="900" autocomplete="off"></label>
       </div>
       <label class="fld">Location<input id="ev-loc" name="event-place" type="text" maxlength="200" autocomplete="off" data-lpignore="true" data-1p-ignore data-bwignore></label>
-      <label class="fld">Project<select id="ev-proj" name="event-project"></select></label>
+      <div class="fld-row">
+        <label class="fld">Project<select id="ev-proj" name="event-project"></select></label>
+        <label class="fld">Remind me<select id="ev-remind" name="event-remind" data-value=""></select></label>
+      </div>
       <div class="fld">To arrange
         <ul class="subs" id="ev-subs"></ul>
         <div class="subaddrow"><input class="subadd" id="ev-subadd" name="event-arrange" type="text" maxlength="300" placeholder="Add something to arrange…" aria-label="New thing to arrange" autocomplete="off" enterkeyhint="done" data-lpignore="true" data-1p-ignore data-bwignore><button type="button" class="btn small" data-act="evsub-add" title="Add it to the list">Add</button></div>
@@ -156,6 +159,25 @@ $theme = ($_COOKIE['planner_theme'] ?? '') === 'light' ? 'light' : 'dark';   // 
   </form>
 </dialog>
 
+<dialog id="gev-dlg" aria-labelledby="gev-head">
+  <div class="dlg-head"><h2 id="gev-head">Calendar event</h2><button type="button" class="btn icon" data-act="gev-close" title="Close" aria-label="Close">×</button></div>
+  <section class="ev-form">
+    <div><b class="gev-title" id="gev-title"></b><p class="hint" id="gev-when"></p></div>
+    <div class="fld">Subtasks
+      <ul class="subs" id="gev-subs"></ul>
+      <div class="subaddrow"><input class="subadd" id="gev-subadd" name="calendar-subtask" type="text" maxlength="300" placeholder="Add a subtask…" aria-label="New subtask" autocomplete="off" enterkeyhint="done" data-lpignore="true" data-1p-ignore data-bwignore><button type="button" class="btn small" data-act="gev-sub-add" title="Add the subtask">Add</button></div>
+    </div>
+    <label class="fld">Notes<textarea id="gev-notes" name="calendar-notes" rows="3" maxlength="5000" placeholder="Notes…"></textarea></label>
+    <p class="hint">Subtasks and notes stay in the planner; the event itself is Google’s.</p>
+  </section>
+  <section class="dlg-foot">
+    <button type="button" class="btn danger" data-act="gev-hide">Hide from the planner</button>
+    <span class="hint">It stays in Google Calendar.</span>
+    <span class="sp"></span>
+    <button type="button" class="btn go" data-act="gev-close">Done</button>
+  </section>
+</dialog>
+
 <dialog id="settings">
   <div class="dlg-head"><h2>Settings</h2><button class="btn icon" data-act="settings-close" title="Close" aria-label="Close">×</button></div>
 
@@ -163,9 +185,10 @@ $theme = ($_COOKIE['planner_theme'] ?? '') === 'light' ? 'light' : 'dark';   // 
     <h3>Google Calendar</h3>
     <p id="cal-state" class="hint"></p>
     <div id="cal-setup">
-      <p class="hint">Your events show up as locked blocks, so you only plan the time you really have. The planner reads
-        them through a small script that runs inside <b>your own</b> Google account; your Google password never reaches
-        the planner. Five steps, about three minutes, done once.</p>
+      <p class="hint">Your events show up on the timeline, so you see the time you really have, and your planned times
+        and events go back into Google Calendar, which reminds you of them. The planner talks to Google through a small
+        script that runs inside <b>your own</b> Google account; your Google password never reaches the planner. Five
+        steps, about three minutes, done once.</p>
       <ol class="steps">
         <li><b>Copy the script.</b>
           <button class="btn small" data-act="copy-code">Copy script</button>
@@ -189,8 +212,11 @@ $theme = ($_COOKIE['planner_theme'] ?? '') === 'light' ? 'light' : 'dark';   // 
       <details>
         <summary>What can the script see and do?</summary>
         <p class="hint">It reads the events of every calendar you have ticked in Google Calendar (calendars you
-          subscribed to there, such as Outlook, included). It writes only the time blocks you send, into a separate
-          calendar named “Planner”, and only ever removes blocks it created itself. It carries a secret key made for
+          subscribed to there, such as Outlook, included). It writes your planned times and events into calendars of
+          its own, one per board, named “Planner” and the board’s name (for example “Planner Main”), and only ever
+          changes or removes events it made itself. It never deletes a calendar. It also uses Google’s lock and
+          script-properties services, to remember which calendar belongs to which board and to stop two updates
+          running at once. It carries a secret key made for
           this planner and ignores every request without that key, which is why “Anyone” is safe to choose in step 3.
           Don’t share the script. You can switch it off at any time: in Apps Script, <b>Deploy › Manage
           deployments › Archive</b>.</p>
@@ -198,8 +224,10 @@ $theme = ($_COOKIE['planner_theme'] ?? '') === 'light' ? 'light' : 'dark';   // 
       <details>
         <summary>It didn’t connect</summary>
         <ul class="hint">
-          <li><b>“Google answered with a page instead of data”</b>: in step 3, “Who has access” must be <b>Anyone</b>
-            (not “Anyone with a Google account”). Use Deploy › Manage deployments › edit to change it.</li>
+          <li><b>“Google answered with a page instead of data”</b>: either “Who has access” is not <b>Anyone</b> (it
+            must not be “Anyone with a Google account”), or the script ran into an error. For both: copy the script
+            again, paste it over the old one, then Deploy › Manage deployments › edit: set Who has access to
+            <b>Anyone</b> and Version to <b>New version</b>, then Deploy.</li>
           <li><b>“The bridge refused the key”</b>: the script in Google is not the one from step 1. Copy it again,
             paste it over the old one, then Deploy › Manage deployments › edit › Version: <b>New version</b> › Deploy.</li>
           <li><b>The URL is refused</b>: use the <b>Web app URL</b> (it ends in <code>/exec</code>), not the address
@@ -212,13 +240,20 @@ $theme = ($_COOKIE['planner_theme'] ?? '') === 'light' ? 'light' : 'dark';   // 
     <div id="cal-on" hidden>
       <p class="hint">Events are read again every ten minutes; the ↻ button at the top of the board reads them now.
         To show or hide a calendar, tick or untick it in Google Calendar’s list.</p>
+      <p class="hint">Your planned times and events go into one Google calendar per board, named “Planner” and the
+        board’s name (for example “Planner Main”), for the next 45 days. Reminders you set ring through Google
+        Calendar, on every device where it is signed in; on a phone, Google Calendar’s own notification settings
+        decide how. A deleted board’s calendar is left as it is: delete it in Google Calendar if you no longer want it.</p>
+      <label class="chkrow"><input type="checkbox" id="auto-sync" name="auto-sync"> Keep Google Calendar up to date automatically</label>
+      <p class="hint" id="sync-last"></p>
       <button class="btn small" data-act="disconnect-cal">Disconnect calendar</button>
       <details id="cal-update">
         <summary>Update the script</summary>
-        <p class="hint" id="cal-old" hidden>Your calendar script is older than this planner, so the Calendar page
-          cannot show your Google events yet.</p>
-        <p class="hint">A newer planner can need a newer script. Updating keeps the same web app URL, so there is
-          nothing to change here afterwards.</p>
+        <p class="hint" id="cal-old" hidden>Your calendar script is older than this planner, so it cannot yet show
+          your Google events on the Calendar page, set reminders or keep one calendar per board.</p>
+        <p class="hint">A newer planner can need a newer script: this one brings Google events on the Calendar page,
+          reminders, and one Google calendar per board. Updating keeps the same web app URL, so there is nothing to
+          change here afterwards.</p>
         <ol class="steps">
           <li><b>Copy the script again.</b>
             <button class="btn small" data-act="copy-code">Copy script</button>
@@ -229,7 +264,8 @@ $theme = ($_COOKIE['planner_theme'] ?? '') === 'light' ? 'light' : 'dark';   // 
               (Ctrl+A, or ⌘A on a Mac) and paste over it.</span></li>
           <li><b>Deploy it as a new version.</b>
             <span class="sub">Top right: <b>Deploy › Manage deployments</b>. Click the pencil (edit), set
-              <b>Version: New version</b>, then click <b>Deploy</b>.</span></li>
+              <b>Version: New version</b>, then click <b>Deploy</b>. If Google asks for permission again, allow it as
+              the first time: <b>Advanced</b>, then <b>Go to Untitled project (unsafe)</b>, then <b>Allow</b>.</span></li>
         </ol>
       </details>
     </div>

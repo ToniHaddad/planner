@@ -5,6 +5,7 @@
 Starts PHP's built-in server on a throwaway copy of public/ plus a fake calendar bridge,
 so nothing here touches real data or Google.
 """
+import hashlib
 import http.cookiejar
 import http.server
 import json
@@ -23,7 +24,11 @@ from datetime import date, timedelta
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-PORT, BRIDGE_PORT, LOCAL_PORT, MIGRATE_PORT = 8791, 8792, 8793, 8796
+# check names use marks like the repeat arrow; a console or a pipe in another encoding must not stop the run
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
+PORT, BRIDGE_PORT, LOCAL_PORT, MIGRATE_PORT, MIGRATE5_PORT = 8791, 8792, 8793, 8796, 8797
 BASE = f"http://127.0.0.1:{PORT}"
 passed = failed = 0
 pushed = []
@@ -39,11 +44,30 @@ def check(name, cond, detail=""):
         print(f"FAIL {name} {detail}")
 
 
+TEAM = {"id": "team-call@google.com", "title": "Team <b>call</b>", "start": 600, "end": 660, "calendar": "Main", "color": "#3366CC"}
+HOLIDAY = {"id": "holiday@google.com", "title": "Holiday", "calendar": "Main"}
+
+
 class Bridge(http.server.BaseHTTPRequestHandler):
     key = None
     knows_range = True       # False acts like a script pasted before the Calendar page existed
+    knows_sync = True        # False acts like a script pasted before one calendar per board existed
+    with_ids = True          # False acts like a script pasted before events carried their Google ids
     range_error = None       # an error the bridge reports for a range
     range_calls = 0
+    synced = []              # every sync request, as sent
+    busy = False             # True acts like a script already running another update (its lock is taken)
+    odd_reply = None         # (status, body) sent instead of the answer to a GET, to test what the planner accepts
+    day_events = None        # the timed events of a day, when not the usual one
+    sync_seconds = 0         # a slow sync, to see that the browser never starts a second one meanwhile
+    in_flight = 0
+    most_in_flight = 0
+    lock = threading.Lock()
+    store = {}               # what the fake Google calendars hold after the syncs: {board id: {key: item}}
+
+    @staticmethod
+    def ev(e):
+        return {k: v for k, v in e.items() if Bridge.with_ids or k != "id"}
 
     def log_message(self, *a):
         pass
@@ -56,10 +80,20 @@ class Bridge(http.server.BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def send_raw(self, status, body):
+        data = body.encode() if isinstance(body, str) else json.dumps(body).encode()
+        self.send_response(status)
+        self.send_header("Content-Type", "text/html" if isinstance(body, str) else "application/json")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
     def do_GET(self):
         q = dict(urllib.parse.parse_qsl(urllib.parse.urlparse(self.path).query))
         if q.get("key") != Bridge.key:
             return self.send({"error": "forbidden"})
+        if Bridge.odd_reply and q.get("action") != "ping":
+            return self.send_raw(*Bridge.odd_reply)
         if q.get("action") == "ping":
             return self.send({"ok": True, "tz": "Europe/Paris", "calendars": ["Main", "Outlook"]})
         if q.get("action") == "range":
@@ -72,17 +106,43 @@ class Bridge(http.server.BaseHTTPRequestHandler):
             days = {q["from"]: {"events": [], "allDay": [{"title": "Range start", "calendar": "Main"}]},
                     "1999-01-01": {"events": [], "allDay": [{"title": "Outside the range", "calendar": "Main"}]}}
             if q["from"] <= today <= q["to"]:
-                days[today] = {"events": [{"title": "Team <b>call</b>", "start": 600, "end": 660, "calendar": "Main"}],
-                               "allDay": [{"title": "Holiday", "calendar": "Main"}]}
+                days[today] = {"events": [Bridge.ev(TEAM)], "allDay": [Bridge.ev(HOLIDAY)]}
             return self.send({"ok": True, "tz": "Europe/Paris", "days": days})
-        self.send({"ok": True, "tz": "Europe/Paris", "events": [
-            {"title": "Team <b>call</b>", "start": 600, "end": 660, "calendar": "Main", "color": "#fff"}],
-            "allDay": [{"title": "Holiday", "calendar": "Main"}]})
+        self.send({"ok": True, "tz": "Europe/Paris", "events": [Bridge.ev(e) for e in (Bridge.day_events or [TEAM])],
+                   "allDay": [Bridge.ev(HOLIDAY)]})
 
     def do_POST(self):
         body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
         if body.get("key") != Bridge.key:
             return self.send({"error": "forbidden"})
+        if body.get("action") == "sync":
+            if not Bridge.knows_sync:
+                return self.send({"error": "unknown action"})
+            if Bridge.busy:
+                return self.send({"error": "busy"})
+            with Bridge.lock:
+                Bridge.in_flight += 1
+                Bridge.most_in_flight = max(Bridge.most_in_flight, Bridge.in_flight)
+            time.sleep(Bridge.sync_seconds)
+            with Bridge.lock:
+                Bridge.in_flight -= 1
+            Bridge.synced.append(body)
+            # the same difference the real script makes: new keys are added, changed ones written again, missing ones removed
+            counts = {"created": 0, "updated": 0, "removed": 0}
+            for b in body["boards"]:
+                have = Bridge.store.setdefault(b["id"], {})
+                want = {it["key"]: it for it in b["items"]}
+                for k in [k for k in have if k not in want]:
+                    del have[k]
+                    counts["removed"] += 1
+                for k, it in want.items():
+                    if k not in have:
+                        counts["created"] += 1
+                    elif have[k] != it:
+                        counts["updated"] += 1
+                    have[k] = it
+            return self.send({"ok": True, **counts, "partial": False,
+                              "calendars": [{"id": f"cal{b['id']}", "name": "Planner " + b["name"]} for b in body["boards"]]})
         pushed.append(body)
         self.send({"ok": True, "created": len(body["blocks"]), "removed": 0})
 
@@ -151,6 +211,7 @@ def main():
         run(site)
         run_local(work)
         run_migration(work)
+        run_migration_v5(work)
     finally:
         php.terminate()
         bridge.shutdown()
@@ -285,6 +346,8 @@ def run(site):
 
     run_boards(c, today)
     run_events(c, today)
+    run_repeat(c, today, site)
+    run_reminders(c, today, site)
 
     # --- calendar ---
     _, cal = c.api("calendar", day=today)
@@ -306,6 +369,8 @@ def run(site):
     check("bridge script carries the key", status == 200 and Bridge.key in code["code"] and "__BRIDGE_KEY__" not in code["code"])
     check("bridge script answers ranges", "action === 'range'" in code["code"])
     run_month_google(c, today)
+    run_extras(c, today, site)
+    run_sync(c, today, site)
 
     # --- files that must never be served (PHP's dev server has no .htaccess, so check the rules exist) ---
     ht = (site / ".htaccess").read_text()
@@ -561,7 +626,7 @@ def run_events(c, today):
     check("events: notes and the checklist are kept like a task's", w.get("notes") == "a\nb"
           and w.get("subs") == [{"title": "Book the room", "done": True}, {"title": "Print badges", "done": False}], str(w))
     check("events: the answer has exactly the agreed fields", set(w) == {"id", "board", "title", "from", "to", "start", "end",
-          "location", "p", "notes", "subs"}, str(sorted(w)))
+          "location", "p", "notes", "subs", "remind"}, str(sorted(w)))
     status, r = c.api("event_add", {"title": "One day", "from": day(12)})
     one = r.get("event", {})
     check("events: without a To date the event lasts one day", status == 200 and one.get("to") == day(12)
@@ -706,7 +771,7 @@ def run_events(c, today):
     mt = [t for t in m["tasks"] if t["id"] == planned]
     check("month: the planned task, with only the fields the calendar needs", len(mt) == 1 and mt[0] == {
           "id": planned, "title": "Planned in range", "day": day(10), "where": "top", "slot": 1, "start": 600,
-          "dur": 30, "done": False, "p": pid}, str(mt))
+          "dur": 30, "done": False, "p": pid, "repeat": "", "remind": None}, str(mt))
     check("month: tasks in the brain dump are left out", all(t["id"] != dumped for t in m["tasks"]))
     check("month: Google is reported as not connected", m["google"] == {"connected": False}, str(m["google"]))
     status, m = c.api("month", **{"from": day(8), "to": day(14)}, board=b2)
@@ -763,7 +828,8 @@ def run_month_google(c, today):
     status, m = c.api("month", **{"from": day(-3), "to": day(3)})
     g = m.get("google", {})
     check("month: Google events come through for the range", status == 200 and g.get("connected") is True
-          and g["days"][today]["events"][0] == {"title": "Team <b>call</b>", "start": 600, "end": 660, "calendar": "Main"}
+          and {k: g["days"][today]["events"][0].get(k) for k in ("title", "start", "end", "calendar", "id", "color")}
+          == {"title": "Team <b>call</b>", "start": 600, "end": 660, "calendar": "Main", "id": TEAM["id"], "color": "#3366cc"}
           and g["days"][today]["allDay"][0]["title"] == "Holiday" and g["days"][day(-3)]["allDay"][0]["title"] == "Range start", str(g))
     check("month: days outside the range are dropped", "1999-01-01" not in g.get("days", {}), str(g.get("days", {}).keys()))
     check("month: the bridge was asked once", Bridge.range_calls == before + 1, str(Bridge.range_calls - before))
@@ -796,6 +862,555 @@ def run_month_google(c, today):
     _, m = c.api("month", **{"from": day(-3), "to": day(3)})
     check("month: after disconnecting, Google is not connected", m["google"] == {"connected": False}, str(m.get("google")))
     c.api("calendar_connect", {"url": f"http://127.0.0.1:{BRIDGE_PORT}/exec"})
+
+
+def wipe_repeats(site):
+    """Tests of repeating tasks leave copies on many days: they go straight from the database."""
+    con = sqlite3.connect(site / "data" / "planner.sqlite")
+    con.execute("DELETE FROM tasks WHERE series_id IS NOT NULL")
+    con.execute("DELETE FROM series")
+    con.execute("DELETE FROM series_skips")
+    con.commit()
+    con.close()
+
+
+def run_repeat(c, today, site):
+    """Repeating tasks: a copy on every day the rule gives, made ahead of time and changed from a day on."""
+    d0 = date.today()
+
+    def day(n):
+        return (d0 + timedelta(days=n)).isoformat()
+    _, st = c.api("state", day=today)
+    first = st["board"]
+    pid = st["projects"][0]["id"]
+    titles = []
+
+    def add_planned(title, d, board=None, **patch):
+        titles.append(title)
+        body = {"title": title, "p": pid}
+        if board:
+            body = {"title": title, "board": board}
+        _, r = c.api("task_add", body)
+        _, r = c.api("task_update", {"id": r["task"]["id"], "patch": dict({"where": "also", "day": d}, **patch)})
+        return r["task"]
+
+    def repeat(t, rule, view=today):
+        return c.api("task_repeat", {"id": t["id"], "rule": rule, "day": view, "today": today})
+
+    def on_day(d, title, board=None):
+        params = {"day": d}
+        if board:
+            params["board"] = board
+        _, st = c.api("state", **params)
+        return [x for x in st["tasks"] if x["title"] == title and x["day"] == d]
+
+    def in_range(f, t, title):
+        _, m = c.api("month", **{"from": f, "to": t})
+        return sorted(x["day"] for x in m["tasks"] if x["title"] == title)
+
+    t = add_planned("Stand-up", today, start=540, dur=15, remind=10, subs=[{"title": "Notes ready", "done": True}])
+    check("repeat: a task that does not repeat says so", t["repeat"] == "" and t["remind"] == 10, str(t))
+    status, _ = c.api("task_repeat", {"id": t["id"], "rule": "daily", "day": today, "today": today}, csrf=False)
+    check("repeat: setting it without the CSRF token is refused", status == 403)
+    status, _ = c.api("task_repeat", None, id=t["id"])
+    check("repeat: setting it with a GET is refused", status == 405)
+    for bad in ({"rule": "hourly"}, {"rule": None}, {"day": "2026-02-30"}, {"today": "2031-01-01"}, {"today": None}):
+        body = {"id": t["id"], "rule": "daily", "day": today, "today": today}
+        body.update(bad)
+        status, r = c.api("task_repeat", body)
+        check(f"repeat: refused with 400: {bad}", status == 400, str(r))
+    status, _ = c.api("task_repeat", {"id": 99999, "rule": "daily", "day": today, "today": today})
+    check("repeat: an unknown task gives 404", status == 404)
+
+    # every day
+    status, r = repeat(t, "daily")
+    check("repeat: a task set to repeat every day says so", status == 200 and r["task"]["repeat"] == "daily" and r["task"]["day"] == today, str(r))
+    nxt = on_day(day(1), "Stand-up")
+    check("repeat: tomorrow already has its copy: same time, length and reminder, subtasks unticked",
+          len(nxt) == 1 and nxt[0]["start"] == 540 and nxt[0]["dur"] == 15 and nxt[0]["remind"] == 10 and nxt[0]["repeat"] == "daily"
+          and nxt[0]["subs"] == [{"title": "Notes ready", "done": False}] and nxt[0]["where"] == "also" and not nxt[0]["done"], str(nxt))
+    check("repeat: asking for that day again makes no second copy", len(on_day(day(1), "Stand-up")) == 1)
+    check("repeat: the month lists one copy on every day", in_range(today, day(9), "Stand-up") == [day(n) for n in range(10)],
+          str(in_range(today, day(9), "Stand-up")))
+    c.api("task_update", {"id": t["id"], "patch": {"done": True}})
+    check("repeat: ticking today's copy leaves tomorrow's open", not on_day(day(1), "Stand-up")[0]["done"])
+
+    # a deleted copy stays deleted
+    c.api("task_delete", {"id": on_day(day(2), "Stand-up")[0]["id"]})
+    check("repeat: a deleted copy is not made again, the next day still has one",
+          on_day(day(2), "Stand-up") == [] and len(on_day(day(3), "Stand-up")) == 1)
+
+    # one copy changed, then its details used from that day on
+    c3, c5 = on_day(day(3), "Stand-up")[0], on_day(day(5), "Stand-up")[0]
+    c.api("task_update", {"id": c5["id"], "patch": {"done": True}})
+    c.api("task_update", {"id": c3["id"], "patch": {"title": "Stand-up call", "start": 570}})
+    check("repeat: changing one copy changes only that day", on_day(day(4), "Stand-up")[0]["start"] == 540)
+    status, r = c.api("series_apply", {"id": c3["id"]})
+    check("repeat: 'Use these details from this day on' is accepted", status == 200 and r["task"]["repeat"] == "daily", str(r))
+    after = on_day(day(4), "Stand-up call")
+    check("repeat: the days after it now have the new details", len(after) == 1 and after[0]["start"] == 570
+          and on_day(day(4), "Stand-up") == [], str(after))
+    check("repeat: the days before it keep the old ones", on_day(day(1), "Stand-up")[0]["start"] == 540)
+    check("repeat: a copy ticked ahead of time is kept and not made twice",
+          on_day(day(5), "Stand-up call") == [] and on_day(day(5), "Stand-up")[0]["done"])
+    status, r = c.api("series_apply", {"id": on_day(day(1), "Stand-up")[0]["id"] + 100000})
+    check("repeat: using the details of an unknown task gives 404", status == 404)
+
+    # another rule from a day on, then Never
+    c6 = on_day(day(6), "Stand-up call")[0]
+    status, r = repeat(c6, "weekly")
+    check("repeat: a copy can change the rule", status == 200 and r["task"]["repeat"] == "weekly", str(r))
+    check("repeat: from that day the new rule gives the days", in_range(day(6), day(20), "Stand-up call") == [day(6), day(13), day(20)],
+          str(in_range(day(6), day(20), "Stand-up call")))
+    check("repeat: the days before keep the old rule", on_day(day(4), "Stand-up call")[0]["repeat"] == "daily")
+    status, r = repeat(on_day(day(13), "Stand-up call")[0], "")
+    check("repeat: Never stops it from that day on; that day's task stays, not repeating",
+          r["task"]["repeat"] == "" and in_range(day(6), day(30), "Stand-up call") == [day(6), day(13)],
+          str(in_range(day(6), day(30), "Stand-up call")))
+
+    # weekdays
+    w = add_planned("Weekday walk", today)
+    repeat(w, "weekdays")
+    want = sorted({today} | {day(n) for n in range(14) if (d0 + timedelta(days=n)).weekday() < 5})
+    check("repeat: weekdays skips Saturdays and Sundays", in_range(today, day(13), "Weekday walk") == want,
+          str(in_range(today, day(13), "Weekday walk")))
+
+    # monthly, on a 31st followed by a shorter month
+    a = d0
+    while not (a.day == 31 and (a + timedelta(days=1)).month in (2, 4, 6, 9, 11)):
+        a += timedelta(days=1)
+    nm = a + timedelta(days=1)
+    last = date(nm.year + nm.month // 12, nm.month % 12 + 1, 1) - timedelta(days=1)
+    m = add_planned("Pay rent", a.isoformat())
+    status, r = repeat(m, "monthly")
+    got = in_range(a.isoformat(), (a + timedelta(days=61)).isoformat(), "Pay rent")
+    check("repeat: every month on the 31st falls on the last day of a shorter month", got[:2] == [a.isoformat(), last.isoformat()]
+          and len([x for x in got if x[:7] == nm.isoformat()[:7]]) == 1, str(got))
+
+    # Today's 3: a taken place sends the copy to "Also today"
+    _, r = c.api("task_add", {"title": "Main thing"})
+    titles.append("Main thing")
+    c.api("task_update", {"id": r["task"]["id"], "patch": {"where": "top", "slot": 0, "day": day(8)}})
+    f = add_planned("Daily focus", day(7))
+    c.api("task_update", {"id": f["id"], "patch": {"where": "top", "slot": 0}})
+    repeat(f, "daily", day(7))
+    c8, c9 = on_day(day(8), "Daily focus"), on_day(day(9), "Daily focus")
+    check("repeat: a copy whose place in Today's 3 is taken goes to Also today", c8 and c8[0]["where"] == "also" and c8[0]["slot"] is None, str(c8))
+    check("repeat: on a free day it takes its place in Today's 3", c9 and c9[0]["where"] == "top" and c9[0]["slot"] == 0, str(c9))
+
+    # from the brain dump
+    _, r = c.api("task_add", {"title": "From the dump"})
+    titles.append("From the dump")
+    status, r = c.api("task_repeat", {"id": r["task"]["id"], "rule": "weekly", "day": day(1), "today": today})
+    check("repeat: a task in the brain dump is first planned on the day in view", status == 200 and r["task"]["where"] == "also"
+          and r["task"]["day"] == day(1) and r["task"]["repeat"] == "weekly", str(r))
+
+    # missed copies carry over
+    p = add_planned("Water the plants", day(-3))
+    repeat(p, "daily")
+    c.api("rollover", {"today": today})
+    _, st = c.api("state", day=today)
+    dumped = [x for x in st["tasks"] if x["title"] == "Water the plants" and x["where"] == "dump"]
+    check("repeat: missed copies of the days gone are carried to the brain dump, still repeating",
+          len(dumped) == 3 and all(x["carried"] and x["repeat"] == "daily" for x in dumped), str(dumped))
+    check("repeat: today has its own copy, planned", len(on_day(today, "Water the plants")) == 1)
+    c.api("rollover", {"today": today})
+    _, st = c.api("state", day=today)
+    check("repeat: a second rollover makes nothing twice",
+          len([x for x in st["tasks"] if x["title"] == "Water the plants"]) == 4)
+
+    # a deleted board's series moves; its coming copies are made again on the new board
+    _, r = c.api("board_add", {"name": "Temp"})
+    b2 = r["board"]["id"]
+    o = add_planned("Board two daily", today, board=b2)
+    repeat(o, "daily")
+    on_day(day(1), "Board two daily", board=b2)
+    on_day(day(2), "Board two daily", board=b2)
+    c.api("board_delete", {"id": b2})
+    _, st = c.api("state", day=today)
+    moved = [x for x in st["tasks"] if x["title"] == "Board two daily"]
+    check("repeat: a deleted board's coming copies do not fill the other board's brain dump",
+          len(moved) == 1 and moved[0]["where"] == "dump", str(moved))
+    nd = on_day(day(2), "Board two daily")
+    check("repeat: the series goes on, on the board that took the tasks", len(nd) == 1 and nd[0]["repeat"] == "daily"
+          and nd[0]["board"] == first, str(nd))
+
+    # deleting a project
+    _, r = c.api("project_add", {"name": "Gone", "color": "#101010", "board": first})
+    pg = r["project"]["id"]
+    q = add_planned("Project daily", today, p=pg)
+    repeat(q, "daily")
+    c.api("project_delete", {"id": pg})
+    nd = on_day(day(3), "Project daily")
+    check("repeat: after its project is deleted, new copies come without a project", len(nd) == 1 and nd[0]["p"] is None, str(nd))
+
+    wipe_repeats(site)
+    _, st = c.api("state", day=today)
+    for x in st["tasks"]:
+        if x["title"] in titles:
+            c.api("task_delete", {"id": x["id"]})
+    for d in (day(1), day(7), day(8), a.isoformat()):
+        _, st = c.api("state", day=d)
+        for x in st["tasks"]:
+            if x["title"] in titles:
+                c.api("task_delete", {"id": x["id"]})
+    _, m = c.api("month", **{"from": day(-3), "to": day(58)})
+    check("repeat: the test tasks are cleaned up", not [x for x in m["tasks"] if x["title"] in titles], str(m["tasks"])[:300])
+
+
+def run_reminders(c, today, site):
+    """Reminders: minutes before a timed task or event, or before the first day of an all-day event."""
+    _, r = c.api("task_add", {"title": "Remind me"})
+    tid = r["task"]["id"]
+    c.api("task_update", {"id": tid, "patch": {"where": "also", "day": today, "start": 600}})
+    ok = True
+    for v in (5, 10, 15, 30, 60, 1440):
+        status, r = c.api("task_update", {"id": tid, "patch": {"remind": v}})
+        ok = ok and status == 200 and r["task"]["remind"] == v
+    check("reminders: a task takes every offered reminder", ok)
+    for bad in (7, "15", -5, 2000, True, 900):
+        status, r = c.api("task_update", {"id": tid, "patch": {"remind": bad}})
+        check(f"reminders: a task refuses {bad!r}", status == 400 and r.get("error") == "Bad reminder", str(r))
+    status, r = c.api("task_update", {"id": tid, "patch": {"remind": 0}})
+    check("reminders: 'at the time' (0) from an older page becomes 5 minutes, the least Google takes",
+          status == 200 and r["task"]["remind"] == 5, str(r))
+    con = sqlite3.connect(site / "data" / "planner.sqlite")
+    con.execute("UPDATE tasks SET remind = 0 WHERE id = ?", (tid,))
+    con.commit()
+    con.close()
+    _, st = c.api("state", day=today)
+    check("reminders: a stored 0 is read as 5", next(x for x in st["tasks"] if x["id"] == tid)["remind"] == 5)
+    status, r = c.api("task_update", {"id": tid, "patch": {"remind": None}})
+    check("reminders: a reminder can be taken off", status == 200 and r["task"]["remind"] is None)
+    c.api("task_delete", {"id": tid})
+
+    status, r = c.api("event_add", {"title": "All-day reminder", "from": today, "remind": 900})
+    ad = r.get("event", {})
+    check("reminders: an all-day event takes 'the day before at 09:00' (900)", status == 200 and ad.get("remind") == 900, str(r))
+    ok = True
+    for v in (360, 2340, 9540, None):
+        status, r = c.api("event_update", {"id": ad["id"], "patch": {"remind": v}})
+        ok = ok and status == 200 and r["event"]["remind"] == v
+    check("reminders: ...and the other all-day choices", ok)
+    status, r = c.api("event_add", {"title": "x", "from": today, "remind": 15})
+    check("reminders: an all-day event refuses a timed reminder", status == 400 and r.get("error") == "Bad reminder", str(r))
+    status, r = c.api("event_add", {"title": "Timed reminder", "from": today, "start": 600, "end": 660, "remind": 15})
+    te = r.get("event", {})
+    check("reminders: a timed event takes 15 minutes before", status == 200 and te.get("remind") == 15, str(r))
+    status, r = c.api("event_add", {"title": "Zero", "from": today, "start": 600, "end": 660, "remind": 0})
+    check("reminders: a timed event sent 0 gets 5", status == 200 and r["event"]["remind"] == 5, str(r))
+    c.api("event_delete", {"id": r.get("event", {}).get("id", 0)})
+    status, r = c.api("event_add", {"title": "x", "from": today, "start": 600, "end": 660, "remind": 900})
+    check("reminders: a timed event refuses an all-day reminder", status == 400 and r.get("error") == "Bad reminder", str(r))
+    status, r = c.api("event_update", {"id": te["id"], "patch": {"start": None, "end": None}})
+    check("reminders: making a timed event all-day with a timed reminder is refused as a whole", status == 400
+          and r.get("error") == "Bad reminder", str(r))
+    status, r = c.api("event_update", {"id": te["id"], "patch": {"start": None, "end": None, "remind": 360}})
+    check("reminders: ...and works with an all-day reminder", status == 200 and r["event"]["remind"] == 360, str(r))
+    status, r = c.api("event_update", {"id": te["id"], "patch": {"remind": "soon"}})
+    check("reminders: a reminder that is not a number is refused", status == 400, str(r))
+    for i in (ad["id"], te["id"]):
+        c.api("event_delete", {"id": i})
+
+
+def run_extras(c, today, site):
+    """Google events: subtasks, notes and 'hidden' kept by the planner, found again by a key per event and day."""
+    d0 = date.today()
+
+    def day(n):
+        return (d0 + timedelta(days=n)).isoformat()
+
+    def sha(text):
+        return hashlib.sha1(text.encode()).hexdigest()
+    _, cal = c.api("calendar", day=today, refresh="1")
+    team, hol = cal["events"][0], cal["allDay"][0]
+    check("google: an event's key comes from the day, its Google id, its start and its calendar",
+          team["key"] == sha(f"{today}|{TEAM['id']}|600|Main") and hol["key"] == sha(f"{today}|{HOLIDAY['id']}||Main"), str(team))
+    check("google: it starts with no notes, no subtasks, not hidden, with its calendar's color",
+          team["notes"] == "" and team["subs"] == [] and team["hidden"] is False and team["color"] == "#3366cc", str(team))
+    status, r = c.api("cal_extra", {"day": today, "key": team["key"],
+                                    "patch": {"subs": [{"title": " Agenda  <b>x</b> ", "done": False}], "notes": "Room\r\n2"}})
+    check("google: subtasks and notes are saved, tidied like a task's", status == 200
+          and r["extra"] == {"key": team["key"], "notes": "Room\n2", "subs": [{"title": "Agenda <b>x</b>", "done": False}],
+                             "hidden": False}, str(r))
+    _, cal = c.api("calendar", day=today)
+    check("google: the day read from the cache shows them at once", cal["events"][0]["notes"] == "Room\n2"
+          and cal["events"][0]["subs"] == [{"title": "Agenda <b>x</b>", "done": False}], str(cal["events"][0]))
+    _, m = c.api("month", **{"from": day(-3), "to": day(3)})
+    check("google: so does the Calendar page", m["google"]["days"][today]["events"][0]["notes"] == "Room\n2", str(m["google"])[:300])
+    status, r = c.api("cal_extra", {"day": today, "key": hol["key"], "patch": {"hidden": True}})
+    _, cal = c.api("calendar", day=today)
+    _, m = c.api("month", **{"from": day(-3), "to": day(3)})
+    check("google: an event can be hidden from the planner", status == 200 and cal["allDay"][0]["hidden"] is True
+          and m["google"]["days"][today]["allDay"][0]["hidden"] is True, str(cal["allDay"]))
+    status, r = c.api("cal_extra", {"day": today, "key": hol["key"], "patch": {"hidden": False}})
+    _, cal = c.api("calendar", day=today)
+    check("google: ...and shown again, the other event's notes untouched", cal["allDay"][0]["hidden"] is False
+          and cal["events"][0]["notes"] == "Room\n2")
+    for body, code, why in (({"day": today, "key": "abc", "patch": {}}, 400, "a key that is not one"),
+                            ({"day": today, "key": "0" * 40, "patch": {}}, 404, "a key not on that day"),
+                            ({"day": day(-1), "key": team["key"], "patch": {}}, 404, "a key of another day"),
+                            ({"day": "2026-13-01", "key": team["key"], "patch": {}}, 400, "a bad day"),
+                            ({"day": today, "key": team["key"], "patch": {"hidden": "yes"}}, 400, "hidden that is not true or false"),
+                            ({"day": today, "key": team["key"], "patch": {"subs": "x"}}, 400, "subtasks that are no list"),
+                            ({"day": today, "key": team["key"], "patch": {"notes": 5}}, 400, "notes that are no text")):
+        status, r = c.api("cal_extra", body)
+        check(f"google: refused with {code}: {why}", status == code, str(r))
+    status, _ = c.api("cal_extra", {"day": today, "key": team["key"], "patch": {}}, csrf=False)
+    check("google: saving without the CSRF token is refused", status == 403)
+    status, _ = c.api("cal_extra", None, day=today)
+    check("google: saving with a GET is refused", status == 405)
+
+    # two occurrences of a repeating Google event share the id: they still get keys, and notes, of their own
+    Bridge.day_events = [TEAM, dict(TEAM, start=900, end=960)]
+    _, cal = c.api("calendar", day=today, refresh="1")
+    one, two = cal["events"][0], cal["events"][1]
+    c.api("cal_extra", {"day": today, "key": two["key"], "patch": {"notes": "Second one"}})
+    _, cal = c.api("calendar", day=today)
+    check("google: two occurrences of one repeating event on a day get keys and notes of their own",
+          one["key"] != two["key"] and cal["events"][0]["notes"] == "Room\n2" and cal["events"][1]["notes"] == "Second one",
+          str(cal["events"]))
+    Bridge.day_events = None
+    c.api("calendar", day=today, refresh="1")
+
+    # an older script sends no ids: the key comes from what the event looks like
+    Bridge.with_ids = False
+    _, cal = c.api("calendar", day=today, refresh="1")
+    check("google: without a Google id the key is made from day, title, times and calendar",
+          cal["events"][0]["key"] == sha(f"{today}|Team <b>call</b>|600|660|Main")
+          and cal["allDay"][0]["key"] == sha(f"{today}|Holiday|||Main"), str(cal["events"][0]))
+    status, r = c.api("cal_extra", {"day": today, "key": cal["events"][0]["key"], "patch": {"notes": "Old script"}})
+    check("google: notes work with such a key too", status == 200 and r["extra"]["notes"] == "Old script")
+    Bridge.with_ids = True
+    c.api("calendar", day=today, refresh="1")
+
+    # only a plain "ok" from the script counts; anything else is an error and is not cached
+    for reply, words, why in (((200, {"events": [], "allDay": []}), "does not understand", "an answer without ok"),
+                              ((500, {"ok": True, "events": [], "allDay": []}), "status 500", "an error status"),
+                              ((200, "<html>Sign in</html>"), "ran into an error", "a page instead of data")):
+        Bridge.odd_reply = reply
+        _, cal = c.api("calendar", day=day(5), refresh="1")
+        Bridge.odd_reply = None
+        check(f"google: {why} is an error", words in cal.get("error", ""), str(cal))
+        _, cal = c.api("calendar", day=day(5))
+        check(f"google: ...and is not cached: the next read asks again and gets the events", not cal.get("error")
+              and cal["events"][0]["title"] == "Team <b>call</b>", str(cal))
+    Bridge.odd_reply = (200, {"days": {}})
+    _, m = c.api("month", **{"from": day(30), "to": day(33)})
+    Bridge.odd_reply = None
+    check("google: a range answer without ok is an error on the Calendar page, not an empty month",
+          "does not understand" in m["google"].get("error", ""), str(m.get("google")))
+
+    # what was kept for days long gone is forgotten by the daily rollover
+    con = sqlite3.connect(site / "data" / "planner.sqlite")
+    con.execute("INSERT INTO cal_extras (key, day, notes, subs, hidden, updated_at) VALUES (?, ?, 'x', '[]', 0, 0)", ("a" * 40, day(-61)))
+    con.execute("INSERT INTO cal_extras (key, day, notes, subs, hidden, updated_at) VALUES (?, ?, 'x', '[]', 0, 0)", ("b" * 40, day(-10)))
+    con.commit()
+    con.close()
+    c.api("rollover", {"today": today})
+    con = sqlite3.connect(site / "data" / "planner.sqlite")
+    keys = {k for (k,) in con.execute("SELECT key FROM cal_extras")}
+    con.execute("DELETE FROM cal_extras")
+    con.commit()
+    con.close()
+    check("google: notes of events more than 60 days ago are purged, recent ones kept", "a" * 40 not in keys and "b" * 40 in keys, str(keys))
+
+
+def run_sync(c, today, site):
+    """Sending the plan to Google: every board, one calendar each, the timed tasks and events of the window."""
+    d0 = date.today()
+
+    def day(n):
+        return (d0 + timedelta(days=n)).isoformat()
+    status, _ = c.api("calendar_sync", None, today=today)
+    check("sync: a GET is refused", status == 405)
+    status, _ = c.api("calendar_sync", {"today": today}, csrf=False)
+    check("sync: without the CSRF token it is refused", status == 403)
+    status, r = c.api("calendar_sync", {"today": "2031-01-01"})
+    check("sync: a 'today' far from the server's clock is refused", status == 400, str(r))
+    _, st = c.api("state", day=today)
+    first = st["board"]
+    check("sync: state tells whether it is on, when it last ran and the debounce",
+          set(st["sync"]) == {"auto", "last", "needsUpdate", "delay"} and st["sync"]["auto"] is True, str(st["sync"]))
+    pid, color = st["projects"][0]["id"], st["projects"][0]["color"]
+
+    def task(title, d, board=None, **patch):
+        _, r = c.api("task_add", {"title": title, "p": pid} if not board else {"title": title, "board": board})
+        _, r = c.api("task_update", {"id": r["task"]["id"], "patch": dict({"where": "also", "day": d}, **patch)})
+        return r["task"]["id"]
+    t1 = task("Write <b>plan</b>", today, start=540, dur=45, remind=15, notes="Bring laptop",
+              subs=[{"title": "Outline", "done": True}, {"title": "Draft", "done": False}])
+    t2 = task("No time", today)
+    t3 = task("Far away", day(50), start=600)
+    t4 = task("Done one", day(1), start=480, done=True)
+    _, r = c.api("event_add", {"title": "Fair", "from": day(2), "to": day(4), "location": "Hall 4", "remind": 900,
+                               "subs": [{"title": "Badges", "done": False}, {"title": "Stand", "done": True}]})
+    e1 = r["event"]["id"]
+    _, r = c.api("event_add", {"title": "Visit", "from": day(3), "start": 600, "end": 690, "remind": 30})
+    e2 = r["event"]["id"]
+    _, r = c.api("board_add", {"name": "Second"})
+    b2 = r["board"]["id"]
+    t5 = task("Their task", day(1), board=b2, start=700)
+
+    Bridge.store.clear()
+    Bridge.synced.clear()
+    status, r = c.api("calendar_sync", {"today": today})
+    body = Bridge.synced[-1] if Bridge.synced else {}
+    sent = sum(len(b["items"]) for b in body.get("boards", []))
+    check("sync: it runs and reports what it did: everything is new the first time", status == 200 and r.get("ok") and r.get("created") == sent >= 6
+          and r.get("updated") == 0 and r.get("removed") == 0 and r.get("partial") is False, str(r))
+    check("sync: the window is yesterday to 45 days on", body.get("from") == day(-1) and body.get("to") == day(45), str(body.get("from")))
+    check("sync: one entry per board, by id and name", [(b["id"], b["name"]) for b in body.get("boards", [])]
+          == [(first, "Main"), (b2, "Second")], str([(b["id"], b["name"]) for b in body.get("boards", [])]))
+    check("sync: the answer names the calendars", [x["name"] for x in r.get("calendars", [])] == ["Planner Main", "Planner Second"], str(r.get("calendars")))
+    items = {it["key"]: it for it in body["boards"][0]["items"]}
+    check("sync: a timed task goes with its time, length, color, reminder, notes and open subtasks", items.get(f"task:{t1}") == {
+          "key": f"task:{t1}", "title": "Write <b>plan</b>", "description": "Bring laptop\n\nSubtasks:\n- Draft", "allDay": False,
+          "date": today, "start": 540, "dur": 45, "color": color, "remind": 15}, str(items.get(f"task:{t1}")))
+    check("sync: a task without a time stays out, and so does one past the window",
+          f"task:{t2}" not in items and f"task:{t3}" not in items, str(list(items)))
+    check("sync: a ticked task stays, marked with a tick", items.get(f"task:{t4}", {}).get("title") == "✓ Done one")
+    check("sync: an all-day event goes over its days, with its place and what is left to arrange", items.get(f"event:{e1}") == {
+          "key": f"event:{e1}", "title": "Fair", "description": "Where: Hall 4\n\nTo arrange:\n- Badges", "allDay": True,
+          "from": day(2), "to": day(4), "color": None, "remind": 900}, str(items.get(f"event:{e1}")))
+    v = items.get(f"event:{e2}", {})
+    check("sync: a timed event goes with its day, start and length", v.get("allDay") is False and v.get("date") == day(3)
+          and v.get("start") == 600 and v.get("dur") == 90 and v.get("remind") == 30, str(v))
+    check("sync: each board sends only its own", [it["key"] for it in body["boards"][1]["items"]] == [f"task:{t5}"]
+          and f"task:{t5}" not in items)
+
+    status, r = c.api("calendar_sync", {"today": today})
+    check("sync: run again with nothing changed, nothing is written", (r["created"], r["updated"], r["removed"]) == (0, 0, 0), str(r))
+    c.api("task_update", {"id": t1, "patch": {"title": "Write the plan"}})
+    c.api("task_delete", {"id": t4})
+    status, r = c.api("calendar_sync", {"today": today})
+    check("sync: a changed task is written again and a deleted one removed", (r["created"], r["updated"], r["removed"]) == (0, 1, 1), str(r))
+    _, st = c.api("state", day=today)
+    last = st["sync"]["last"] or {}
+    check("sync: the last run is remembered", last.get("updated") == 1 and last.get("removed") == 1 and abs(last.get("at", 0) - time.time()) < 60, str(last))
+
+    # repeating tasks: the copies of every day in the window go too
+    rep = task("Daily sync", today, start=800)
+    c.api("task_repeat", {"id": rep, "rule": "daily", "day": today, "today": today})
+    c.api("calendar_sync", {"today": today})
+    titles = [it["title"] for it in Bridge.synced[-1]["boards"][0]["items"]]
+    check("sync: a repeating task goes on every day of the window", titles.count("Daily sync") == 46, str(titles.count("Daily sync")))
+
+    # another update running in the script: wait for the next turn, remember nothing
+    _, st = c.api("state", day=today)
+    last_before = st["sync"]["last"]
+    Bridge.busy = True
+    status, r = c.api("calendar_sync", {"today": today})
+    Bridge.busy = False
+    _, st = c.api("state", day=today)
+    check("sync: a busy script means try again later: no error, nothing remembered", status == 200 and r.get("busy") is True
+          and "created" not in r and st["sync"]["last"] == last_before, str(r))
+
+    # switching automatic sync off and on
+    status, r = c.api("auto_sync", {"on": False})
+    _, st = c.api("state", day=today)
+    check("sync: automatic sync can be switched off", status == 200 and r["sync"]["auto"] is False and st["sync"]["auto"] is False)
+    status, r = c.api("auto_sync", {"on": "no"})
+    check("sync: the switch takes only true or false", status == 400)
+    c.api("auto_sync", {"on": True})
+
+    # an older script without sync
+    Bridge.knows_sync = False
+    status, r = c.api("calendar_sync", {"today": today})
+    check("sync: an older script gives needsUpdate, not an error", status == 200 and r.get("needsUpdate") is True
+          and r["sync"]["needsUpdate"] is True, str(r))
+    _, st = c.api("state", day=today)
+    check("sync: ...which state remembers", st["sync"]["needsUpdate"] is True)
+    status, r = c.api("calendar_push", {"day": today})
+    check("sync: the old Send to calendar still works with such a script", status == 200, str(r))
+    Bridge.knows_sync = True
+    c.api("calendar_connect", {"url": f"http://127.0.0.1:{BRIDGE_PORT}/exec"})
+    _, st = c.api("state", day=today)
+    check("sync: connecting again clears it", st["sync"]["needsUpdate"] is False)
+
+    wipe_repeats(site)
+    for i in (t1, t2, t3, t5):
+        c.api("task_delete", {"id": i})
+    for i in (e1, e2):
+        c.api("event_delete", {"id": i})
+    c.api("board_delete", {"id": b2})
+    _, st = c.api("state", day=today)
+    for x in st["tasks"]:
+        if x["title"] == "Their task":
+            c.api("task_delete", {"id": x["id"]})
+
+
+def run_migration_v5(work):
+    """A database of version 5 (events, no repeats, no reminders) is upgraded in place."""
+    today = date.today().isoformat()
+    site = work / "migrate5"
+    shutil.copytree(ROOT / "public", site, ignore=shutil.ignore_patterns("planner.sqlite*", "sessions", "config.php", "server.log"))
+    (site / "data" / "config.php").write_text(
+        "<?php return ['env'=>'local','bridge_key'=>'" + "k" * 64 + "','local_key'=>'" + "V" * 64 + "'];", encoding="utf-8")
+    dbfile = site / "data" / "planner.sqlite"
+    con = sqlite3.connect(dbfile)
+    con.executescript("""
+        CREATE TABLE settings (k TEXT PRIMARY KEY, v TEXT NOT NULL);
+        CREATE TABLE projects (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, color TEXT NOT NULL,
+            sort INTEGER NOT NULL DEFAULT 0, board_id INTEGER NOT NULL DEFAULT 1);
+        CREATE TABLE tasks (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL,
+            project_id INTEGER REFERENCES projects(id) ON DELETE SET NULL, dur INTEGER NOT NULL DEFAULT 30,
+            place TEXT NOT NULL DEFAULT 'dump', slot INTEGER, day TEXT, start INTEGER,
+            done INTEGER NOT NULL DEFAULT 0, done_at TEXT, carried INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL,
+            notes TEXT NOT NULL DEFAULT '', subs TEXT NOT NULL DEFAULT '[]', board_id INTEGER NOT NULL DEFAULT 1);
+        CREATE INDEX tasks_day ON tasks(day);
+        CREATE INDEX tasks_board ON tasks(board_id);
+        CREATE TABLE attempts (ip TEXT NOT NULL, ts INTEGER NOT NULL);
+        CREATE INDEX attempts_ts ON attempts(ts);
+        CREATE TABLE cal_cache (day TEXT PRIMARY KEY, json TEXT NOT NULL, fetched_at INTEGER NOT NULL);
+        CREATE TABLE boards (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, sort INTEGER NOT NULL DEFAULT 0);
+        INSERT INTO boards (id, name, sort) VALUES (1, 'Main', 1);
+        CREATE TABLE events (id INTEGER PRIMARY KEY AUTOINCREMENT, board_id INTEGER NOT NULL DEFAULT 1,
+            title TEXT NOT NULL, day_from TEXT NOT NULL, day_to TEXT NOT NULL, start INTEGER, "end" INTEGER,
+            location TEXT NOT NULL DEFAULT '', project_id INTEGER REFERENCES projects(id) ON DELETE SET NULL,
+            notes TEXT NOT NULL DEFAULT '', subs TEXT NOT NULL DEFAULT '[]', created_at TEXT NOT NULL);
+        CREATE INDEX events_board_day ON events(board_id, day_from);
+        CREATE TABLE cal_range_cache (k TEXT PRIMARY KEY, json TEXT NOT NULL, fetched_at INTEGER NOT NULL);
+        INSERT INTO projects (name, color, sort, board_id) VALUES ('Work', '#ff7a59', 1, 1);
+        INSERT INTO tasks (title, project_id, dur, place, day, start, created_at, notes, subs)
+            VALUES ('Kept task', 1, 45, 'also', '%(d)s', 600, '2026-01-01', 'kept', '[{"title":"s","done":true}]');
+        INSERT INTO events (board_id, title, day_from, day_to, location, project_id, created_at)
+            VALUES (1, 'Kept event', '%(d)s', '%(d)s', 'Hall', 1, '2026-01-01');
+        PRAGMA user_version = 5;
+    """ % {"d": today})
+    con.commit()
+    con.close()
+    php = subprocess.Popen(["php", "-S", f"127.0.0.1:{MIGRATE5_PORT}", "-t", str(site), str(ROOT / "tools" / "router.php")],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        c = Client()
+        c.base = f"http://127.0.0.1:{MIGRATE5_PORT}"
+        for _ in range(50):
+            try:
+                urllib.request.urlopen(c.base + "/", timeout=1)
+                break
+            except Exception:
+                time.sleep(0.1)
+        _, html, _ = c.raw("/?k=" + "V" * 64)
+        c.csrf = re.search(r'name="csrf" content="([0-9a-f]+)"', html).group(1)
+        status, st = c.api("state", day=today)
+        kept = [x for x in st.get("tasks", []) if x["title"] == "Kept task"]
+        check("migration 5: the task is kept, not repeating, without a reminder", status == 200 and len(kept) == 1
+              and kept[0]["repeat"] == "" and kept[0]["remind"] is None and kept[0]["notes"] == "kept"
+              and kept[0]["subs"] == [{"title": "s", "done": True}], str(kept))
+        ev = st.get("events", [])
+        check("migration 5: the event is kept, without a reminder", len(ev) == 1 and ev[0]["title"] == "Kept event"
+              and ev[0]["location"] == "Hall" and ev[0]["remind"] is None, str(ev))
+        con = sqlite3.connect(dbfile)
+        version = con.execute("PRAGMA user_version").fetchone()[0]
+        con.close()
+        check("migration 5: the database is now version 6", version == 6, str(version))
+        status, r = c.api("task_repeat", {"id": kept[0]["id"], "rule": "daily", "day": today, "today": today})
+        check("migration 5: the old task can repeat", status == 200 and r["task"]["repeat"] == "daily", str(r))
+        status, r = c.api("event_update", {"id": ev[0]["id"], "patch": {"remind": 900}})
+        check("migration 5: the old event can get a reminder", status == 200 and r["event"]["remind"] == 900, str(r))
+    finally:
+        php.terminate()
 
 
 def run_local(work):
@@ -925,11 +1540,12 @@ def run_migration(work):
         con = sqlite3.connect(dbfile)
         version = con.execute("PRAGMA user_version").fetchone()[0]
         con.close()
-        check("migration: the database is now version 5", version == 5, str(version))
+        check("migration: the database is now version 6", version == 6, str(version))
         con = sqlite3.connect(dbfile)
         tables = {r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
         con.close()
-        check("migration: the events table and the range cache exist", {"events", "cal_range_cache"} <= tables, str(tables))
+        check("migration: the events, series and calendar tables exist",
+              {"events", "cal_range_cache", "series", "series_skips", "cal_extras"} <= tables, str(tables))
         status, r = c.api("event_add", {"title": "After the upgrade", "from": today, "board": st["board"]})
         check("migration: an event can be added to the upgraded database", status == 200
               and r["event"]["title"] == "After the upgrade", str(r))

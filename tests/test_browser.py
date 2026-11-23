@@ -5,6 +5,7 @@
 Uses the same throwaway local server and fake calendar bridge as test_api.py.
 """
 import http.server
+import re
 import shutil
 import subprocess
 import sys
@@ -44,7 +45,7 @@ def main():
     (site / "data" / "config.php").write_text(
         "<?php return ['env'=>'dev','username'=>'alex','password_hash'=>'" + hashed +
         "','cred_version'=>1,'bridge_key'=>'" + key + "','allow_test_bridge'=>true,"
-        "'day_start'=>7];", encoding="utf-8")
+        "'day_start'=>7,'sync_delay_ms'=>400];", encoding="utf-8")       # a short wait before an automatic sync
     bridge = http.server.ThreadingHTTPServer(("127.0.0.1", T.BRIDGE_PORT), T.Bridge)
     threading.Thread(target=bridge.serve_forever, daemon=True).start()
     php = subprocess.Popen(["php", "-S", f"127.0.0.1:{T.PORT}", "-t", str(site)],
@@ -65,6 +66,7 @@ def main():
             run(page)
             run_touch(browser, problems)
             run_phone_calendar(browser, problems)
+            run_touch_events(browser, problems)
             # the one deliberate wrong-password try in run() makes the browser log one 400; anything else is a problem
             expected = "Failed to load resource: the server responded with a status of 400 (Bad Request)"
             if expected in problems:
@@ -139,35 +141,43 @@ def run(page):
     check("settings shows the bridge script with its key", "k" * 64 in page.input_value("#bridge-code"))
     page.fill("#bridge-url", f"http://127.0.0.1:{T.BRIDGE_PORT}/exec")
     page.click("[data-act=connect-cal]")
-    page.wait_for_selector("#tl .booked")
+    page.wait_for_selector("#tl .gcal")
     check("settings switch to the connected view", page.locator("#cal-on").is_visible()
           and not page.locator("#cal-setup").is_visible() and "Main, Outlook" in page.locator("#cal-state").inner_text())
     page.click("[data-act=settings-close]")
     check("Send to calendar appears once connected", page.locator("#push").is_visible())
-    check("calendar event shows as a booked block", "Team <b>call</b>" in page.locator("#tl .booked").inner_text()
-          and page.locator("#tl .booked b").count() == 0)
+    gblk = page.locator("#tl .gcal")
+    check("a calendar event shows on the timeline with a calendar mark, its title as text",
+          "Team <b>call</b>" in gblk.inner_text() and page.locator("#tl .gcal b").count() == 0
+          and page.locator("#tl .gcal .gmark").count() == 1 and "🔒" not in gblk.inner_text())
+    check("...as a plain block, not striped and not locked",
+          gblk.evaluate("e => getComputedStyle(e).backgroundImage") == "none"
+          and gblk.evaluate("e => getComputedStyle(e).cursor") == "pointer" and gblk.get_attribute("draggable") is None)
     check("all-day event shows as a chip", "Holiday" in page.locator("#allday").inner_text())
 
-    drop_on_timeline(page, "#z-dump .item:has-text('Call the supplier')", 190)   # 10:10, inside the 10:00-11:00 event
-    page.wait_for_timeout(400)
-    check("a drop on booked time is refused", page.locator("#tl .blk[data-blk]").count() == 1
-          and "Booked" in page.locator("#toast").inner_text())
-
-    drop_on_timeline(page, "#z-dump .item:has-text('Call the supplier')", 300)   # 12:00
-    page.locator("#tl .blk[data-blk]").nth(1).wait_for()
-    check("a drop on free time works and moves the task to Also today",
-          page.locator("#z-also .item:has-text('Call the supplier')").count() == 1)
+    drop_on_timeline(page, "#z-dump .item:has-text('Call the supplier')", 190)   # 10:15, while the 10:00-11:00 event is on
+    beside = page.locator("#tl .blk[data-blk]:has-text('Call the supplier')")
+    beside.wait_for()
+    page.wait_for_timeout(300)
+    a, b = beside.bounding_box(), gblk.bounding_box()
+    check("a task dropped at the time of a calendar event is accepted, in Also today", "10:15" in beside.inner_text()
+          and page.locator("#z-also .item:has-text('Call the supplier')").count() == 1, beside.inner_text())
+    check("...and sits beside the event", a["x"] >= b["x"] + b["width"] - 1 or a["x"] + a["width"] <= b["x"] + 1, f"{a} {b}")
 
     page.locator("#top3 .check").first.click()
     page.wait_for_selector("#top3 .slot.done")
     check("main task can be ticked off", page.locator("#tl .blk.done").count() == 1)
 
     page.click("[data-act=push]")
-    page.locator("#toast:has-text('sent')").wait_for()
-    check("send to calendar pushes both blocks", len(T.pushed) >= 1 and len(T.pushed[-1]["blocks"]) == 2)
+    page.locator("#toast:has-text('Google Calendar is up to date')").wait_for()
+    sent = [it["title"] for it in T.Bridge.synced[-1]["boards"][0]["items"]] if T.Bridge.synced else []
+    check("Send to calendar brings Google up to date, the ticked block marked",
+          {"✓ Write the report", "Call the supplier"} <= set(sent)
+          and re.match(r"Google Calendar is up to date: \d+ added, \d+ changed, \d+ removed\.$", page.locator("#toast-msg").inner_text()),
+          str(sent) + page.locator("#toast-msg").inner_text())
 
     page.reload()
-    page.wait_for_selector("#tl .booked")
+    page.wait_for_selector("#tl .gcal")
     check("everything is still there after a reload", page.locator("#tl .blk[data-blk]").count() == 2
           and page.locator("#top3 .slot.done").count() == 1 and page.locator("#z-dump .item").count() == 1)
 
@@ -291,6 +301,8 @@ def run(page):
     run_sub_reorder(page)
     run_boards(page)
     run_events(page)
+    run_google(page)
+    run_repeat_remind(page)
 
 
 def run_sub_rename(page):
@@ -604,9 +616,9 @@ def run_events(page):
     check("calendar: the switch shows the Calendar page and hides the Day page",
           page.locator("#cal").is_visible() and not page.locator(".cols").is_visible()
           and "on" in page.get_attribute("[data-page=calendar]", "class").split())
-    check("calendar: the heading names the month; free time and Send to calendar are hidden",
+    check("calendar: the heading names the month; free time is hidden, Send to calendar stays",
           page.locator("#dayname").inner_text() == today.strftime("%B %Y") and not page.locator("#free").is_visible()
-          and not page.locator("#push").is_visible(), page.locator("#dayname").inner_text())
+          and page.locator("#push").is_visible(), page.locator("#dayname").inner_text())
     page.reload()
     page.wait_for_selector("#cal-grid .cell")
     check("calendar: the page choice is kept after a reload", page.locator("#cal").is_visible() and not page.locator(".cols").is_visible())
@@ -719,7 +731,7 @@ def run_events(page):
     page.click("#calstat [data-act=refresh-cal]")
     page.wait_for_selector("#cal-note:visible")
     check("calendar: with an older script the page says how to update it", page.locator("#cal-note").inner_text()
-          == "To see Google Calendar events here, update the calendar script: Settings › Google Calendar.")
+          == "Update the calendar script to get Google events on this page, reminders and one Google calendar per board: Settings › Google Calendar.")
     page.click("#cal-note [data-act=settings-update]")
     wait_until(page, lambda: "doGet" in page.input_value("#bridge-code"))
     check("calendar: Settings opens on the update steps, with the script ready to copy",
@@ -765,6 +777,261 @@ def run_phone_calendar(browser, problems):
           page.locator(f".wday[data-cday='{day}']").count() == 1 and abs(a["x"] - b["x"]) < 2 and b["y"] > a["y"])
     width = page.evaluate("document.documentElement.scrollWidth")
     check("phone: the week fits the width too", width <= 390, str(width))
+    ctx.close()
+
+
+def run_google(page):
+    """Google events on the Day page: a dialog with subtasks and notes, hiding with Undo, and showing them again."""
+    page.reload()
+    g = "#tl .gcal:has-text('Team')"
+    page.wait_for_selector(g)
+    page.click(g)
+    page.wait_for_selector("#gev-dlg[open]")
+    dlg = page.locator("#gev-dlg")
+    check("google: clicking a calendar event opens its dialog: title, time and calendar, as text",
+          page.locator("#gev-title").inner_text() == "Team <b>call</b>" and "10:00–11:00" in page.locator("#gev-when").inner_text()
+          and "Main" in page.locator("#gev-when").inner_text() and page.locator("#gev-title b").count() == 0)
+    check("google: the dialog says the event stays in Google", "It stays in Google Calendar." in dlg.inner_text()
+          and page.locator("#gev-dlg [data-act=gev-hide]").inner_text() == "Hide from the planner")
+    page.fill("#gev-subadd", "Agenda <i>draft</i>")
+    page.click("[data-act=gev-sub-add]")
+    page.wait_for_selector("#gev-subs li")
+    page.fill("#gev-subadd", "Room")
+    page.press("#gev-subadd", "Enter")
+    wait_until(page, lambda: page.locator("#gev-subs li").count() == 2)
+    page.click("#gev-subs li >> nth=0 >> [data-act=gev-sub-done]")
+    page.dblclick("#gev-subs li >> nth=1 >> span")
+    page.fill("#gev-subs input.edit", "Book the room")
+    page.press("#gev-subs input.edit", "Enter")
+    check("google: subtasks are added (button and Enter), ticked and renamed; the dialog stays open",
+          page.locator("#gev-subs li").count() == 2 and page.locator("#gev-subs li.done").count() == 1
+          and "Book the room" in page.locator("#gev-subs li").nth(1).inner_text() and page.locator("#gev-dlg[open]").count() == 1)
+    page.fill("#gev-notes", "Dial-in <b>in</b> the invite")
+    page.click("#gev-dlg .dlg-foot [data-act=gev-close]")
+    page.wait_for_selector("#gev-dlg", state="hidden")
+    page.wait_for_selector(g + " small:has-text('1/2')")
+    check("google: the block shows the subtask count and a pen for the notes", "1/2 ✎" in page.locator(g).inner_text(),
+          page.locator(g).inner_text())
+    page.wait_for_timeout(400)
+    page.reload()
+    page.wait_for_selector(g)
+    page.click(g)
+    page.wait_for_selector("#gev-dlg[open]")
+    check("google: subtasks and notes are kept after a reload, markup as text", page.locator("#gev-subs li").count() == 2
+          and page.locator("#gev-subs li.done").count() == 1 and "Agenda <i>draft</i>" in page.locator("#gev-subs").inner_text()
+          and page.locator("#gev-subs i").count() == 0 and page.input_value("#gev-notes") == "Dial-in <b>in</b> the invite")
+
+    # hide, undo, hide again, then show the day's hidden events again
+    page.click("[data-act=gev-hide]")
+    page.wait_for_selector("#toast.on:has-text('Hidden from the planner')")
+    check("google: hiding takes the event off the timeline", page.locator(g).count() == 0)
+    page.click("#toast-act")
+    page.wait_for_selector(g)
+    check("google: Undo brings it back", page.locator(g).count() == 1)
+    page.click(g)
+    page.wait_for_selector("#gev-dlg[open]")
+    page.click("[data-act=gev-hide]")
+    page.wait_for_selector(g, state="detached")
+    page.click("#allday .gchip:has-text('Holiday')")
+    page.wait_for_selector("#gev-dlg[open]")
+    check("google: an all-day event opens the same dialog", "All day" in page.locator("#gev-when").inner_text())
+    page.click("[data-act=gev-hide]")
+    page.wait_for_timeout(400)
+    page.reload()
+    page.wait_for_selector("#tlhint [data-act=gev-unhide]")
+    check("google: hidden events stay hidden after a reload; the hint offers them back",
+          page.locator(g).count() == 0 and page.locator("#allday .gchip").count() == 0
+          and "2 hidden · show" in page.locator("#tlhint").inner_text(), page.locator("#tlhint").inner_text())
+    page.click("[data-act=gev-unhide]")
+    page.wait_for_selector(g)
+    page.wait_for_selector("#allday .gchip")
+    page.wait_for_timeout(400)
+    page.reload()
+    page.wait_for_selector(g)
+    check("google: '2 hidden · show' brings them back for good", page.locator("#allday .gchip").count() == 1
+          and page.locator("[data-act=gev-unhide]").count() == 0)
+
+
+def run_repeat_remind(page):
+    """Repeat and Remind me in a task's panel; the automatic sync after a change."""
+    title = "Daily <b>stretch</b>"
+    add(page, title)
+    dump = f"#z-dump .task:has(.item:has-text('{title}'))"
+    also = f"#z-also .task:has(.item:has-text('{title}'))"
+    page.click(dump + " [data-act=more]")
+    check("remind: without a time the select is off and says why", page.locator(dump + " [data-remind]").is_disabled()
+          and "Give the task a time first" in page.locator(dump + " .details").inner_text())
+    page.select_option(dump + " [data-repeat]", "daily")
+    page.wait_for_selector(also + " .rep")
+    check("repeat: Every day plans a brain dump task on this day, marked ↻, its title as text",
+          page.locator(dump).count() == 0 and page.locator(also + " .rep").inner_text() == "↻"
+          and page.locator("#z-also b").count() == 0)
+    page.click("[data-act=next]")
+    page.locator("#dayname:has-text('Tomorrow')").wait_for()
+    page.wait_for_selector(also)
+    check("repeat: tomorrow already has it, not done", page.locator(also).count() == 1 and page.locator(also + " .item.done").count() == 0)
+    page.click("[data-act=today]")
+    page.locator("#dayname:has-text('Today')").wait_for()
+    page.wait_for_selector(also)
+    page.click(also + " .item [data-act=done]")
+    page.wait_for_selector(also + " .item.done")
+    page.wait_for_timeout(300)
+    page.click("[data-act=next]")
+    page.locator("#dayname:has-text('Tomorrow')").wait_for()
+    page.wait_for_selector(also)
+    check("repeat: ticking today's leaves tomorrow's open", page.locator(also + " .item.done").count() == 0)
+
+    # tomorrow's copy renamed, and its details used from that day on
+    page.dblclick(also + " [data-title]")
+    page.fill("#z-also input.edit", "Stretch and breathe")
+    page.press("#z-also input.edit", "Enter")
+    also2 = "#z-also .task:has(.item:has-text('Stretch and breathe'))"
+    page.wait_for_selector(also2)
+    page.wait_for_timeout(300)
+    page.click(also2 + " [data-act=more]")
+    page.click(also2 + " [data-act=series-apply]")
+    page.wait_for_selector("#toast.on:has-text('From this day on')")
+    page.click("[data-act=next]")
+    page.locator("#dayname:not(:has-text('Tomorrow'))").wait_for()
+    page.wait_for_selector(also2)
+    check("repeat: 'Use these details from this day on' renames the days after", page.locator(also2).count() == 1
+          and page.locator(also).count() == 0)
+    # Never, on the day after tomorrow: the days after lose it
+    page.click(also2 + " [data-act=more]")
+    page.select_option(also2 + " [data-repeat]", "")
+    page.wait_for_selector("#toast.on:has-text('No longer repeats')")
+    page.wait_for_selector(also2 + " .item")
+    check("repeat: Never keeps this day's task, without ↻", page.locator(also2 + " .rep").count() == 0)
+    page.click("[data-act=next]")
+    page.wait_for_timeout(600)
+    check("repeat: ...and the days after no longer have it", page.locator(also2).count() == 0 and page.locator(also).count() == 0)
+    page.click("[data-act=today]")
+    page.locator("#dayname:has-text('Today')").wait_for()
+
+    # a reminder once the task has a time; the change reaches Google once, a moment later
+    page.wait_for_selector(also)
+    drop_on_timeline(page, also + " .item", 9 * 60)        # 16:00
+    blk = f"#tl .blk[data-blk]:has-text('{title}')"
+    page.wait_for_selector(blk)
+    page.wait_for_timeout(1500)                            # any sync the drop started is over
+    before = len(T.Bridge.synced)
+    if page.locator(also + " .details").count() == 0:
+        page.click(also + " [data-act=more]")
+    check("remind: with a time the select can be used", not page.locator(also + " [data-remind]").is_disabled())
+    page.select_option(also + " [data-remind]", "15")
+    page.wait_for_selector(also + " .bell")
+    page.wait_for_timeout(1800)
+    sent = {it["title"]: it for it in T.Bridge.synced[-1]["boards"][0]["items"]} if T.Bridge.synced else {}
+    check("sync: a change goes to Google by itself, once, a moment later", len(T.Bridge.synced) == before + 1, str(len(T.Bridge.synced) - before))
+    check("sync: ...with the reminder", sent.get("✓ " + title, sent.get(title, {})).get("remind") == 15, str(list(sent)))
+    check("remind: a bell shows on the task and its block", page.locator(also + " .bell").count() >= 1 and page.locator(blk + " .bell").count() == 1)
+    labels = page.locator(also + " [data-remind] option").all_inner_texts()
+    check("remind: 'At the time' is not offered (Google wants 5 minutes at least)", "At the time" not in labels
+          and labels[:2] == ["No reminder", "5 minutes before"], str(labels))
+
+    # never two syncs at once: a slow one runs, and a change made meanwhile waits for it, then goes in a second run
+    T.Bridge.sync_seconds = 1.5
+    T.Bridge.most_in_flight = 0
+    before = len(T.Bridge.synced)
+    page.select_option(also + " [data-remind]", "30")
+    page.wait_for_timeout(900)                             # the first sync is now running
+    page.select_option(also + " [data-remind]", "60")
+    page.wait_for_timeout(4500)
+    T.Bridge.sync_seconds = 0
+    last = {it["title"]: it for it in T.Bridge.synced[-1]["boards"][0]["items"]} if T.Bridge.synced else {}
+    check("sync: never two at once; a change made during one goes in the next", T.Bridge.most_in_flight == 1
+          and len(T.Bridge.synced) == before + 2 and last.get("✓ " + title, last.get(title, {})).get("remind") == 60,
+          f"{T.Bridge.most_in_flight} {len(T.Bridge.synced) - before}")
+    page.select_option(also + " [data-remind]", "15")
+    page.wait_for_timeout(1500)
+    page.reload()
+    page.wait_for_selector(also)
+    page.click(also + " [data-act=more]")
+    check("remind: the reminder is kept after a reload", page.input_value(also + " [data-remind]") == "15")
+    page.click(also + " [data-act=more]")
+
+    # Settings: the automatic sync switch and the per-board calendars
+    page.click("[data-act=settings-open]")
+    check("settings: automatic sync is on, and the calendars per board are explained", page.is_checked("#auto-sync")
+          and "one Google calendar per board" in page.locator("#cal-on").inner_text()
+          and "Last brought up to date" in page.locator("#sync-last").inner_text())
+    page.click("#auto-sync")
+    page.wait_for_timeout(400)
+    page.click("[data-act=settings-close]")
+    page.reload()
+    page.wait_for_selector("#top3 .slot")
+    page.click("[data-act=settings-open]")
+    check("settings: switching it off is kept", not page.is_checked("#auto-sync"))
+    page.click("#auto-sync")
+    page.wait_for_timeout(1500)
+    page.click("[data-act=settings-close]")
+
+
+def run_touch_events(browser, problems):
+    """Events are dragged to another day with a finger too: the week view on a phone, the month view on a tablet."""
+    today = date.today()
+
+    def open_calendar(ctx_opts):
+        ctx = browser.new_context(has_touch=True, is_mobile=True, **ctx_opts)
+        page = ctx.new_page()
+        page.on("console", lambda m: problems.append(m.text) if m.type == "error" else None)
+        page.on("pageerror", lambda e: problems.append(str(e)))
+        page.goto(T.BASE + "/")
+        page.fill("input[name=username]", "alex")
+        page.fill("input[name=password]", "correct horse battery")
+        page.click("button[type=submit]")
+        page.wait_for_selector("#top3 .slot")
+        page.click("[data-act=page][data-page=calendar]")
+        page.wait_for_selector("#cal-grid .cell")
+        return ctx, page
+
+    # a phone, the week view (its days one under the other)
+    ctx, page = open_calendar({"viewport": {"width": 390, "height": 2400}})
+    page.click("[data-act=cal-view][data-view=week]")
+    src_day = today.isoformat()
+    dst_day = (today + timedelta(days=1 if today.weekday() < 6 else -1)).isoformat()
+    ev = f".wday[data-cday='{src_day}'] .ev:has-text('Site visit')"
+    page.wait_for_selector(ev)
+    finger = Finger(page)
+    x, y = centre(page, ev)
+    finger.send("touchStart", x, y)
+    finger.glide(x, y, x, y + 250, steps=6)
+    finger.send("touchEnd")
+    page.wait_for_timeout(300)
+    check("phone: a quick swipe over an event does not move it", page.locator(ev).count() == 1 and page.locator(".drag-clone").count() == 0)
+    page.tap(ev)
+    page.wait_for_selector("#event-dlg[open]")
+    check("phone: a tap on an event opens it", "Site visit" in page.input_value("#ev-title"))
+    page.click("#event-dlg [data-act=event-close] >> nth=1")
+    page.wait_for_selector("#event-dlg", state="hidden")
+    tx, ty = centre(page, f".wday[data-cday='{dst_day}'] .whead")
+    finger.hold_and_drag(ev, tx, ty)
+    moved = f".wday[data-cday='{dst_day}'] .ev:has-text('Site visit')"
+    page.wait_for_selector(moved)
+    check("phone: press, hold and drag moves an event to another day in the week", page.locator(ev).count() == 0
+          and page.locator(".drag-clone").count() == 0 and page.locator("[data-cday].over").count() == 0)
+    page.wait_for_timeout(400)
+    page.reload()
+    page.wait_for_selector(moved)
+    check("phone: the new day is kept after a reload", page.locator(ev).count() == 0)
+    ctx.close()
+
+    # a tablet, the month view: the three-day workshop from run_events, grabbed on its first day
+    ctx, page = open_calendar({"viewport": {"width": 1100, "height": 1300}})
+    first = date(today.year, today.month, 17)
+    d = lambda n: (first + timedelta(days=n)).isoformat()
+    on = lambda day: page.locator(f".cell[data-cday='{day}'] .ev:has-text('Workshop')").count() == 1
+    page.wait_for_selector(f".cell[data-cday='{d(0)}'] .ev:has-text('Workshop')")
+    finger = Finger(page)
+    tx, ty = centre(page, f".cell[data-cday='{d(7)}']")
+    finger.hold_and_drag(f".cell[data-cday='{d(0)}'] .ev:has-text('Workshop')", tx, ty)
+    page.wait_for_selector(f".cell[data-cday='{d(9)}'] .ev:has-text('Workshop')")
+    check("tablet: press, hold and drag moves an event in the month, keeping its length",
+          on(d(7)) and on(d(8)) and on(d(9)) and not on(d(0)) and not on(d(10)))
+    page.wait_for_timeout(400)
+    page.reload()
+    page.wait_for_selector(f".cell[data-cday='{d(9)}'] .ev:has-text('Workshop')")
+    check("tablet: the move is kept after a reload", on(d(7)) and not on(d(0)))
     ctx.close()
 
 
@@ -858,10 +1125,11 @@ def run_touch(browser, problems):
     check("phone: drag onto the timeline makes a block", page.locator("#tl .blk[data-blk]").count() == blocks + 1
           and "19:00" in page.locator("#tl .blk[data-blk]:has-text('Thumb task')").inner_text())
 
-    # a drop on booked time is refused (the fake calendar has an event 10:00-11:00)
-    finger.hold_and_drag("#z-dump .item:has-text('Swipe task') .t", tl["x"] + tl["width"] / 2, tl["y"] + 3 * 52 + 20)
-    check("phone: a drop on booked time is refused", page.locator("#z-dump .item:has-text('Swipe task')").count() == 1
-          and page.locator("#tl .blk[data-blk]").count() == blocks + 1)
+    # a drop while a calendar event is on is accepted (the fake calendar has an event 10:00-11:00)
+    add(page, "Beside task")
+    finger.hold_and_drag("#z-dump .item:has-text('Beside task') .t", tl["x"] + tl["width"] * 0.75, tl["y"] + 3 * 52 + 20)
+    check("phone: a drop at the time of a calendar event is accepted", page.locator("#z-also .item:has-text('Beside task')").count() == 1
+          and page.locator("#tl .blk[data-blk]").count() == blocks + 2)
 
     # make the block longer by pulling its bottom edge
     hx, hy = centre(page, "#tl .blk[data-blk]:has-text('Thumb task') .rs")
