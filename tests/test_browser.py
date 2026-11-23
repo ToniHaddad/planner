@@ -285,7 +285,44 @@ def run(page):
           and "changed" not in page.locator("#toast-msg").inner_text().lower(), page.locator("#toast-msg").inner_text())
     page.click("[data-act=settings-close]")
 
+    run_sub_rename(page)
     run_boards(page)
+
+
+def run_sub_rename(page):
+    """A subtask is renamed by double-clicking it. Uses its own task and deletes it afterwards."""
+    add(page, "Rename host")
+    item = "#z-dump .task:has(.item:has-text('Rename host'))"
+    page.click(item + " [data-act=more]")
+    for title in ("First step", "Second step"):
+        page.fill(item + " .subadd", title)
+        page.press(item + " .subadd", "Enter")
+    page.locator(item + " .subs li").nth(1).wait_for()
+    page.click(item + " .subs li >> nth=1 >> [data-act=sub-done]")
+    page.dblclick(item + " .subs li >> nth=1 >> span")
+    box = page.locator(item + " .subs input.edit")
+    check("subtasks: a double-click turns the title into a box holding it", box.input_value() == "Second step")
+    box.fill("Second <b>step</b>, renamed")
+    box.press("Enter")
+    page.wait_for_selector(item + " .subs li:has-text('renamed')")
+    check("subtasks: the new name shows, as text, and the tick is kept",
+          page.locator(item + " .subs li").nth(1).inner_text().strip().startswith("✓")
+          and "Second <b>step</b>, renamed" in page.locator(item + " .subs li").nth(1).inner_text()
+          and page.locator(item + " .subs b").count() == 0
+          and page.locator(item + " .subs li.done").count() == 1
+          and "First step" in page.locator(item + " .subs li").nth(0).inner_text())
+    page.dblclick(item + " .subs li >> nth=0 >> span")
+    page.locator(item + " .subs input.edit").fill("Thrown away")
+    page.locator(item + " .subs input.edit").press("Escape")
+    check("subtasks: Escape leaves the name as it was", "First step" in page.locator(item + " .subs li").nth(0).inner_text())
+    page.wait_for_timeout(400)
+    page.reload()
+    page.wait_for_selector(item)
+    page.click(item + " [data-act=more]")
+    check("subtasks: the new name is saved", "renamed" in page.locator(item + " .subs li").nth(1).inner_text()
+          and "First step" in page.locator(item + " .subs li").nth(0).inner_text())
+    page.click(item + " .item [data-act=del]")
+    page.wait_for_timeout(300)
 
 
 def run_boards(page):

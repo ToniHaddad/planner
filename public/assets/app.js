@@ -267,7 +267,7 @@ function details(t) {
   return `<div class="details" data-details="${t.id}">
     <ul class="subs">${t.subs.map((s, i) => `<li class="${s.done ? 'done' : ''}">
       <button class="check ${s.done ? 'on' : ''}" data-act="sub-done" data-id="${t.id}" data-i="${i}" title="Done">✓</button>
-      <span>${esc(s.title)}</span>
+      <span data-sub="${t.id}" data-i="${i}" title="Double-click to rename">${esc(s.title)}</span>
       <button class="x" title="Delete subtask" data-act="sub-del" data-id="${t.id}" data-i="${i}">×</button></li>`).join('')}</ul>
     <input class="subadd" type="text" name="subtask" data-subadd="${t.id}" placeholder="Add a subtask and press Enter…" aria-label="New subtask" autocomplete="off" maxlength="300">
     <textarea class="notes" name="notes" data-notes="${t.id}" placeholder="Notes…" aria-label="Notes" rows="2" maxlength="5000">${esc(t.notes)}</textarea>
@@ -546,15 +546,18 @@ document.addEventListener('submit', e => {
   if (e.target.id === 'pw-form') actions['change-pw']();
 });
 
-// rename on double-click
+// rename on double-click: a task's title, or one of its subtasks
 document.addEventListener('dblclick', e => {
-  const el = e.target.closest('[data-title]');
+  const el = e.target.closest('[data-title], [data-sub]');
   if (!el || editing) return;
-  const t = task(+el.dataset.title);
-  if (!t) return;
+  const sub = el.dataset.sub !== undefined, i = +el.dataset.i;
+  const t = task(+(sub ? el.dataset.sub : el.dataset.title));
+  if (!t || (sub && !t.subs[i])) return;
+  const old = sub ? t.subs[i].title : t.title;
   editing = true;
   const inp = document.createElement('input');
-  inp.className = 'edit'; inp.value = t.title; inp.maxLength = 300;
+  inp.className = 'edit'; inp.value = old; inp.maxLength = 300;
+  inp.type = 'text'; inp.name = 'rename'; inp.autocomplete = 'off';
   el.replaceWith(inp); inp.focus(); inp.select();
   const holder = inp.closest('[draggable]');
   if (holder) holder.draggable = false;
@@ -563,7 +566,9 @@ document.addEventListener('dblclick', e => {
     if (finished) return;
     finished = true; editing = false;
     const v = inp.value.trim();
-    if (save && v && v !== t.title) update(t, { title: v }); else render();
+    if (!save || !v || v === old) render();
+    else if (sub) update(t, { subs: t.subs.map((s, k) => k === i ? { title: v, done: s.done } : s) });
+    else update(t, { title: v });
   };
   inp.addEventListener('keydown', ev => { if (ev.key === 'Enter') finish(true); if (ev.key === 'Escape') finish(false); });
   inp.addEventListener('blur', () => finish(true));
