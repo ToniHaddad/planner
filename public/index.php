@@ -59,9 +59,12 @@ $theme = ($_COOKIE['planner_theme'] ?? '') === 'light' ? 'light' : 'dark';   // 
   <div class="app">
     <nav class="tabs" id="tabs" aria-label="Boards" hidden></nav>
     <div class="top">
-      <button class="btn icon" data-act="prev" title="Previous day" aria-label="Previous day">‹</button>
+      <div class="seg" id="pages" role="group" aria-label="Page">
+        <button data-act="page" data-page="day" aria-pressed="true" class="on">Day</button><button data-act="page" data-page="calendar" aria-pressed="false">Calendar</button>
+      </div>
+      <button class="btn icon" id="prev" data-act="prev" title="Previous day" aria-label="Previous day">‹</button>
       <button class="btn" data-act="today">Today</button>
-      <button class="btn icon" data-act="next" title="Next day" aria-label="Next day">›</button>
+      <button class="btn icon" id="next" data-act="next" title="Next day" aria-label="Next day">›</button>
       <h1 id="dayname"></h1><span class="date" id="daydate"></span>
       <span class="pill" id="free"></span>
       <span class="sp"></span>
@@ -98,8 +101,60 @@ $theme = ($_COOKIE['planner_theme'] ?? '') === 'light' ? 'light' : 'dark';   // 
         <div class="tl" id="tl"></div>
       </div>
     </div>
+    <div class="cal" id="cal" hidden>
+      <div class="cal-main">
+        <div class="cal-bar">
+          <div class="seg" id="views" role="group" aria-label="Calendar view">
+            <button data-act="cal-view" data-view="month" aria-pressed="true" class="on">Month</button><button data-act="cal-view" data-view="week" aria-pressed="false">Week</button>
+          </div>
+          <span class="hint" id="cal-hint">Click a day to add an event; drag an event to move it.</span>
+          <span class="sp"></span>
+          <button class="btn go" data-act="event-new">+ Event</button>
+        </div>
+        <p class="cal-note" id="cal-note" hidden></p>
+        <div class="cal-days" id="cal-days"></div>
+        <div class="cal-grid" id="cal-grid"></div>
+      </div>
+      <aside class="up" aria-labelledby="up-head">
+        <h2 class="h" id="up-head">Coming up</h2>
+        <p class="hint">Your events of the next 60 days, and what is still to arrange for the first ones. Tick things off here.</p>
+        <div id="up"></div>
+      </aside>
+    </div>
   </div>
 </div>
+
+<dialog id="event-dlg" aria-labelledby="ev-head">
+  <form id="event-form" autocomplete="off" novalidate>
+    <div class="dlg-head"><h2 id="ev-head">New event</h2><button type="button" class="btn icon" data-act="event-close" title="Close" aria-label="Close">×</button></div>
+    <section class="ev-form">
+      <label class="fld">Title<input id="ev-title" name="event-title" type="text" maxlength="300" autocomplete="off" data-lpignore="true" data-1p-ignore data-bwignore></label>
+      <div class="fld-row">
+        <label class="fld">From<input id="ev-from" name="event-from" type="date" autocomplete="off"></label>
+        <label class="fld">To<input id="ev-to" name="event-to" type="date" autocomplete="off"></label>
+        <label class="fld chk"><input id="ev-allday" name="event-allday" type="checkbox" checked> All day</label>
+      </div>
+      <div class="fld-row" id="ev-times" hidden>
+        <label class="fld">Starts<input id="ev-start" name="event-start" type="time" step="900" autocomplete="off"></label>
+        <label class="fld">Ends<input id="ev-end" name="event-end" type="time" step="900" autocomplete="off"></label>
+      </div>
+      <label class="fld">Location<input id="ev-loc" name="event-place" type="text" maxlength="200" autocomplete="off" data-lpignore="true" data-1p-ignore data-bwignore></label>
+      <label class="fld">Project<select id="ev-proj" name="event-project"></select></label>
+      <div class="fld">To arrange
+        <ul class="subs" id="ev-subs"></ul>
+        <div class="subaddrow"><input class="subadd" id="ev-subadd" name="event-arrange" type="text" maxlength="300" placeholder="Add something to arrange…" aria-label="New thing to arrange" autocomplete="off" enterkeyhint="done" data-lpignore="true" data-1p-ignore data-bwignore><button type="button" class="btn small" data-act="evsub-add" title="Add it to the list">Add</button></div>
+      </div>
+      <label class="fld">Notes<textarea id="ev-notes" name="event-notes" rows="3" maxlength="5000" placeholder="Contacts, times, what to bring…"></textarea></label>
+      <p class="err" id="ev-error" role="alert" hidden></p>
+    </section>
+    <section class="dlg-foot">
+      <button type="button" class="btn danger" id="ev-del" data-act="event-delete">Delete</button>
+      <span class="sp"></span>
+      <button type="button" class="btn" data-act="event-close">Cancel</button>
+      <button type="submit" class="btn go" id="ev-save">Save</button>
+    </section>
+  </form>
+</dialog>
 
 <dialog id="settings">
   <div class="dlg-head"><h2>Settings</h2><button class="btn icon" data-act="settings-close" title="Close" aria-label="Close">×</button></div>
@@ -153,16 +208,35 @@ $theme = ($_COOKIE['planner_theme'] ?? '') === 'light' ? 'light' : 'dark';   // 
             administrator.</li>
         </ul>
       </details>
-      <details id="code-box">
-        <summary>Show the script</summary>
-        <textarea id="bridge-code" readonly rows="6" spellcheck="false" aria-label="Calendar script"></textarea>
-      </details>
     </div>
     <div id="cal-on" hidden>
       <p class="hint">Events are read again every ten minutes; the ↻ button at the top of the board reads them now.
         To show or hide a calendar, tick or untick it in Google Calendar’s list.</p>
       <button class="btn small" data-act="disconnect-cal">Disconnect calendar</button>
+      <details id="cal-update">
+        <summary>Update the script</summary>
+        <p class="hint" id="cal-old" hidden>Your calendar script is older than this planner, so the Calendar page
+          cannot show your Google events yet.</p>
+        <p class="hint">A newer planner can need a newer script. Updating keeps the same web app URL, so there is
+          nothing to change here afterwards.</p>
+        <ol class="steps">
+          <li><b>Copy the script again.</b>
+            <button class="btn small" data-act="copy-code">Copy script</button>
+            <span class="okmark" id="copied-again" hidden>Copied</span></li>
+          <li><b>Paste it over the old one.</b>
+            <a class="btn small" href="https://script.google.com/home" target="_blank" rel="noopener">Open Google Apps Script ↗</a>
+            <span class="sub">Open the project you made for the planner. Click in the code editor, select everything
+              (Ctrl+A, or ⌘A on a Mac) and paste over it.</span></li>
+          <li><b>Deploy it as a new version.</b>
+            <span class="sub">Top right: <b>Deploy › Manage deployments</b>. Click the pencil (edit), set
+              <b>Version: New version</b>, then click <b>Deploy</b>.</span></li>
+        </ol>
+      </details>
     </div>
+    <details id="code-box">
+      <summary>Show the script</summary>
+      <textarea id="bridge-code" readonly rows="6" spellcheck="false" aria-label="Calendar script"></textarea>
+    </details>
     <p class="hint more-cal">Use Outlook, iCloud or another calendar? Anything you subscribe to inside Google Calendar already
       shows up here. If you need a direct connection to something else,
       <a href="<?= h(REPO_URL) ?>/issues/new" target="_blank" rel="noopener">get in touch</a>.</p>

@@ -8,10 +8,10 @@ It takes about three minutes and you do it once. You need a Google account and n
 ## How it works, in one paragraph
 
 The planner never asks for your Google password. Instead, you put a small script (the "bridge") into your own
-Google account, using Google's own tool for that, Apps Script. The script answers two questions, "what is on
-this day?" and "please save these time blocks", and only when the request carries a secret key that your copy
-of the planner generated. You can read the whole script before you use it: it is about 130 lines, in
-[`public/lib/bridge.gs.txt`](../public/lib/bridge.gs.txt).
+Google account, using Google's own tool for that, Apps Script. The script answers three questions, "what is on
+this day?", "what is on these days?" (for the Calendar page) and "please save these time blocks", and only when
+the request carries a secret key that your copy of the planner generated. You can read the whole script before
+you use it: it is about 190 lines, in [`public/lib/bridge.gs.txt`](../public/lib/bridge.gs.txt).
 
 ## The five steps
 
@@ -88,6 +88,20 @@ deletes events that it created itself.
 
 If you change the script later, always deploy it as a **new version** of the same deployment, as described in
 the second row. A brand-new deployment gets a new URL.
+
+## Updating the script
+
+A newer planner can need a newer script. When the script in your Google account is older than the planner, the
+Calendar page says: "To see Google Calendar events here, update the calendar script: Settings › Google
+Calendar." Your day timeline keeps working meanwhile. Updating keeps the same web app URL, so there is nothing
+to change in the planner afterwards. In the planner, open **Settings**, then **Update the script** under
+**Google Calendar**, and follow its three steps:
+
+1. **Copy the script again.** Click **Copy script**.
+2. **Paste it over the old one.** Click **Open Google Apps Script** and open the project you made for the
+   planner. Click in the code editor, select everything (Ctrl+A, or ⌘A on a Mac) and paste over it.
+3. **Deploy it as a new version.** Top right: **Deploy › Manage deployments**. Click the pencil (edit), set
+   **Version: New version**, then click **Deploy**.
 
 ## Disconnecting
 

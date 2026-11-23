@@ -75,6 +75,14 @@ code{font:13px/1.3 Consolas,Menlo,monospace;background:var(--bg);border-radius:5
 .btn.icon{padding:7px 11px;line-height:1}
 .btn.small{padding:3px 9px;font-size:13px}
 .btn:disabled{opacity:.6;cursor:wait}
+.btn.danger{color:var(--bad)}
+.btn.danger:hover{border-color:var(--bad)}
+/* a small two-way switch: Day | Calendar, Month | Week (quieter than the board buttons) */
+.seg{display:inline-flex;gap:2px;padding:2px;border:1px solid var(--line);border-radius:10px;background:var(--field);flex:none}
+.seg button{border:0;background:none;border-radius:8px;padding:4px 12px;font-size:13px;font-weight:650;color:var(--soft)}
+.seg button:hover{color:var(--ink)}
+.seg button.on{background:var(--accent-soft);color:var(--accent)}
+#pages{margin-right:6px}
 .cols{flex:1;display:grid;grid-template-columns:minmax(300px,1fr) minmax(320px,1fr) minmax(0,2fr)}
 .col{padding:18px 18px 22px;border-right:1px solid var(--line);min-width:0}
 .col:last-child{border-right:0}
@@ -151,8 +159,14 @@ li.drag-clone{list-style:none;display:flex;align-items:flex-start;gap:8px;font-s
 .proj:hover .x,.proj:focus-within .x{visibility:visible}
 .link{border:0;background:none;color:var(--accent);font-weight:600;padding:6px 0;margin-top:4px}
 .allday{display:flex;flex-wrap:wrap;gap:6px;margin:0 0 12px 46px}
-.allday:empty{display:none}
 .chip{font-size:12px;background:var(--booked-a);color:var(--booked-ink);border:1px solid var(--booked-line);border-radius:99px;padding:2px 10px}
+/* the board's own events: a card with the project color down its left side */
+.chip.own{display:inline-flex;align-items:center;gap:7px;max-width:100%;background:var(--field);color:var(--ink);border:1px solid var(--line-strong);border-left:4px solid var(--c);border-radius:8px;padding:3px 9px;font-weight:600;cursor:pointer}
+.chip.own span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
+.chip.own b{flex:none;font-size:11px;color:var(--sun);background:color-mix(in srgb,var(--sun) 14%,transparent);border-radius:5px;padding:0 5px}
+.chip.own:hover{border-color:var(--c)}
+.chip.add{background:none;border:1.5px dashed var(--line-strong);color:var(--soft);font-weight:600;cursor:pointer}
+.chip.add:hover{color:var(--accent);border-color:var(--accent)}
 .tl{position:relative;margin-left:46px;border-left:1px solid var(--line);user-select:none}
 .hr{height:52px;border-top:1px solid var(--line);position:relative}
 .hr:after{content:"";position:absolute;left:0;right:0;top:26px;border-top:1px dotted var(--line-soft)}
@@ -172,6 +186,100 @@ li.drag-clone{list-style:none;display:flex;align-items:flex-start;gap:8px;font-s
 .toast{position:fixed;left:50%;bottom:26px;transform:translateX(-50%);background:var(--toast-bg);color:var(--toast-ink);padding:10px 18px;border-radius:99px;font-size:14px;opacity:0;transition:opacity .2s;pointer-events:none;max-width:90vw;z-index:10;display:flex;align-items:center;gap:14px;box-shadow:var(--shadow)}
 .toast.on{opacity:1;pointer-events:auto}
 .toast-act{border:0;background:none;color:inherit;font-weight:700;text-decoration:underline;padding:0}
+
+/* the Calendar page: month or week on the left, "Coming up" on the right */
+.cal{flex:1;display:grid;grid-template-columns:minmax(0,1fr) 310px;min-height:0}
+.cal-main{padding:16px 18px 20px;border-right:1px solid var(--line);min-width:0;display:flex;flex-direction:column}
+.cal-bar{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:12px}
+.cal-bar .hint{margin:0}
+.cal-note{margin:0 0 12px;font-size:13px;color:var(--warn-ink);background:var(--warn-soft);border-radius:10px;padding:8px 12px}
+.cal-note .link{padding:0;margin:0;color:inherit;text-decoration:underline;font-size:inherit}
+.cal-days{display:grid;grid-template-columns:repeat(7,minmax(0,1fr));padding:0 0 6px}
+.cal-days span{font-size:12px;font-weight:650;color:var(--soft);padding-left:8px;overflow:hidden;white-space:nowrap}
+.cal-grid.month{flex:1;display:grid;grid-template-columns:repeat(7,minmax(0,1fr));grid-auto-rows:minmax(118px,1fr);border:1px solid var(--line);border-radius:12px;overflow:hidden}
+.cal-grid.month.rows6{grid-auto-rows:minmax(104px,1fr)}
+.cell{border-right:1px solid var(--line);border-bottom:1px solid var(--line);padding:4px 6px 6px;min-width:0;display:flex;flex-direction:column;gap:3px;cursor:pointer;overflow:hidden}
+.cell:hover{background:color-mix(in srgb,var(--accent-soft) 35%,transparent)}
+.cal-grid.month .cell:nth-child(7n){border-right:0}
+.cal-grid.month .cell:nth-last-child(-n+7){border-bottom:0}
+.cell.out{background:color-mix(in srgb,var(--bg) 55%,transparent)}
+.cell.out .dnum{color:var(--faint)}
+.cell.over,.wday.over{background:var(--accent-soft);outline:2px dashed var(--accent);outline-offset:-3px}
+/* the day number, with "+N more" beside it so a full day still fits its cell */
+.chead{display:flex;align-items:center;justify-content:space-between;gap:4px;flex:none;min-width:0}
+.dnum{align-self:flex-start;flex:none;border:0;background:none;font-weight:700;font-size:13px;min-width:26px;height:24px;border-radius:12px;padding:0 7px;color:var(--ink);font-variant-numeric:tabular-nums}
+.dnum:hover{background:var(--line)}
+.today .dnum{background:var(--accent);color:#1b1c1e}
+:root[data-theme=light] .today .dnum{color:#fff}
+.ev{font-size:12px;font-weight:650;border-radius:6px;padding:2px 7px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;cursor:pointer;line-height:1.35;flex:none;min-width:0;
+  -webkit-user-select:none;user-select:none}
+.ev b{font-weight:800}
+.ev:hover{filter:brightness(1.08)}
+/* an event over several days runs into the next cell, so it reads as one bar */
+.cell .ev.cont-l{border-top-left-radius:0;border-bottom-left-radius:0;margin-left:-7px;padding-left:13px}
+.cell .ev.cont-r{border-top-right-radius:0;border-bottom-right-radius:0;margin-right:-7px}
+.ev.big{white-space:normal;overflow-wrap:anywhere;padding:5px 8px;font-size:12.5px}
+.ev.big small{display:block;font-weight:500;opacity:.85;font-size:11.5px}
+.gev{font-size:12px;border-radius:6px;padding:1px 7px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:none;cursor:default;
+  background:repeating-linear-gradient(135deg,var(--booked-a),var(--booked-a) 6px,var(--booked-b) 6px,var(--booked-b) 12px);color:var(--booked-ink);border:1px solid var(--booked-line)}
+.tline{display:flex;align-items:center;gap:4px;border:0;background:none;padding:1px 2px;font-size:11.5px;color:var(--soft);white-space:nowrap;overflow:hidden;text-align:left;flex:none}
+.tline:hover{color:var(--ink)}
+.tline i{width:7px;height:7px;border-radius:50%;background:var(--sun);flex:none}
+.tline i.off{background:none;box-shadow:inset 0 0 0 1.5px var(--line-strong)}
+.tline span{overflow:hidden;text-overflow:ellipsis;margin-left:2px}
+.more-line{border:0;background:none;padding:0 2px;font-size:11.5px;font-weight:650;color:var(--accent);text-align:left;flex:none}
+.cal-grid.week{flex:1;display:grid;grid-template-columns:repeat(7,minmax(0,1fr));gap:8px}
+.wday{border:1px solid var(--line);border-radius:12px;padding:8px;min-height:360px;display:flex;flex-direction:column;gap:5px;cursor:pointer;min-width:0;background:color-mix(in srgb,var(--field) 45%,transparent)}
+.wday.today{border-color:var(--accent);box-shadow:inset 0 3px 0 var(--accent)}
+.whead{display:flex;align-items:center;gap:6px;margin-bottom:2px;font-size:13px;color:var(--soft);font-weight:600;min-width:0}
+.whead span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.whead .dnum{font-size:15px}
+.wday .gev{white-space:normal;overflow-wrap:anywhere}
+.wsec{font-size:11px;font-weight:700;color:var(--faint);text-transform:uppercase;letter-spacing:.06em;margin-top:6px}
+.wtask{display:flex;align-items:flex-start;gap:7px;font-size:12.5px;line-height:1.3;cursor:default;min-width:0}
+.wtask i{width:8px;height:8px;border-radius:50%;flex:none;margin-top:4px}
+.wtask b{color:var(--sun);font-weight:800}
+.wtask span{flex:1;min-width:0;overflow-wrap:anywhere}
+.wtask small{display:block;color:var(--accent);font-size:11px;font-weight:700}
+.wtask.done span{text-decoration:line-through;color:var(--soft)}
+/* "Coming up": what is next, and what still has to be arranged for it */
+/* its own scroll, so a long list never makes the month taller than the window */
+.up{padding:16px 16px 22px;min-width:0;overflow:auto;contain:size}
+.up .h{font-size:17px}
+.up-empty{color:var(--soft);font-size:13px;border:1.5px dashed var(--line);border-radius:10px;padding:16px 12px;text-align:center;margin:6px 0 0}
+.up-row{border:1px solid var(--line);border-left:4px solid var(--c);border-radius:10px;padding:8px 10px 9px;background:var(--field);margin-top:8px;min-width:0}
+.up-top{display:flex;align-items:center;gap:8px;min-width:0}
+.up-date{font-size:12px;color:var(--soft);font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
+.up-when{margin-left:auto;flex:none;font-size:11px;font-weight:700;color:var(--accent);background:var(--accent-soft);border-radius:99px;padding:1px 8px;white-space:nowrap}
+.up-when.soon{color:var(--warn-ink);background:var(--warn-soft)}
+.up-title{display:block;width:100%;border:0;background:none;padding:0;margin-top:2px;font-weight:700;font-size:14px;text-align:left;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.up-title:hover{color:var(--accent)}
+.up-loc{font-size:12px;color:var(--soft);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.up-loc:before{content:"⌖ ";color:var(--faint)}
+.up-prog{display:flex;align-items:center;gap:8px;margin-top:7px;font-size:11.5px;color:var(--soft);font-variant-numeric:tabular-nums}
+.bar{flex:1;height:5px;border-radius:3px;background:var(--line);overflow:hidden}
+.bar i{display:block;height:100%;background:var(--accent);border-radius:3px}
+.up-prog .ok{color:var(--accent);font-weight:800}
+.up-todo{list-style:none;margin:7px 0 0;padding:6px 0 0;border-top:1px dashed var(--line);display:flex;flex-direction:column;gap:4px}
+.up-todo li{display:flex;align-items:flex-start;gap:7px;font-size:13px;line-height:1.3}
+.up-todo li span{flex:1;min-width:0;overflow-wrap:anywhere}
+.up-todo .check{width:16px;height:16px;font-size:10px;border-radius:5px;margin-top:1px}
+
+/* the event dialog */
+#event-dlg{width:min(560px,94vw)}
+.ev-form{display:flex;flex-direction:column;gap:12px}
+.fld{display:flex;flex-direction:column;gap:5px;font-size:13px;color:var(--soft);font-weight:600;min-width:0;margin:0}
+.fld input:not([type=checkbox]),.fld select,.ev-form textarea{border:1.5px solid var(--line);border-radius:10px;padding:8px 10px;background:var(--field);color:var(--ink);font-weight:400;font-size:14px;width:100%}
+.ev-form textarea{font:inherit;font-size:14px;line-height:1.4;margin:0;min-height:70px}
+.fld input:focus,.fld select:focus,.ev-form textarea:focus{outline:none;border-color:var(--accent)}
+.fld input:disabled{opacity:.55}
+.fld-row{display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end}
+.fld-row .fld{flex:1;min-width:140px}
+.fld-row .fld.chk{flex:none;min-width:0;flex-direction:row;align-items:center;gap:7px;color:var(--ink);padding-bottom:10px;cursor:pointer}
+.fld.chk input{width:17px;height:17px;accent-color:var(--accent);margin:0}
+#ev-subs:not(:empty){margin:2px 0 4px}
+#ev-subs .x{visibility:visible}
+#event-dlg .dlg-foot{position:sticky;bottom:0;background:var(--card)}
 
 /* settings */
 dialog{border:1px solid var(--line);border-radius:20px;padding:0;width:min(680px,94vw);max-height:92vh;background:var(--card);color:var(--ink);box-shadow:0 20px 60px rgba(0,0,0,.45)}
@@ -231,5 +339,20 @@ dialog textarea{width:100%;border:1.5px solid var(--line);border-radius:10px;pad
   .wrap{padding:8px}
   .top{padding:12px 14px}
   .top h1{font-size:20px}
+  /* the Calendar page: "Coming up" under the grid; in a month, events become colored dots */
+  .cal{grid-template-columns:1fr}
+  .cal-main{border-right:0;border-bottom:1px solid var(--line);padding:12px 10px 16px}
+  .cal-days span{padding-left:3px;font-size:11px}
+  .cal-grid.month,.cal-grid.month.rows6{grid-auto-rows:minmax(58px,auto)}
+  .cal-grid.month .cell{flex-direction:row;flex-wrap:wrap;align-content:flex-start;gap:3px;padding:3px}
+  .cal-grid.month .chead{flex-basis:100%}
+  .cal-grid.month .dnum{min-width:0;height:20px;font-size:12px;padding:0 4px;text-align:left}
+  .cal-grid.month .ev,.cal-grid.month .gev{width:8px;height:8px;padding:0;border:0;border-radius:50%;font-size:0;margin:0}
+  .cal-grid.month .gev{background:var(--booked-ink);opacity:.6}
+  .cal-grid.month .tline{padding:0}
+  .cal-grid.month .tline span,.more-line{display:none}
+  .cal-grid.week{grid-template-columns:1fr}
+  .wday{min-height:0}
+  .up{padding:14px 12px 20px;contain:none;overflow:visible}
 }
 @media(prefers-reduced-motion:reduce){*{transition:none!important}}

@@ -40,6 +40,7 @@ What you don't finish goes back to the brain dump the next day, marked "carried"
 - **Subtasks and notes.** The ⋯ on a task opens a checklist and a notes box under it.
 - **Boards.** Keep separate lists for separate people or areas of work, each with its own projects, with buttons at the top to switch. Drag a task onto a button to move it.
 - **Two things at once.** Tasks can share a time on the timeline; they sit side by side.
+- **Events and a Calendar page.** Add all-day or timed events over one or more days, with a place and a "To arrange" checklist. The Calendar page shows them by month or week next to your Google events and planned tasks, and a "Coming up" list counts down to the next ones and lets you tick off what is arranged.
 - **Dark and vivid**, with a light look one click away.
 - **Yours.** Tasks live in one SQLite file on your machine. The app is plain PHP and plain JavaScript: no frameworks, no build step, nothing to keep updated.
 

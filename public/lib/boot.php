@@ -187,6 +187,31 @@ function db(): PDO
             throw $e;
         }
     }
+    if ($version < 5) {
+        // Events: the board's own all-day or timed entries over one or more days, with a place and a
+        // checklist of what to arrange. Google answers for a range of days (the Calendar page) get
+        // their own cache, next to the one for single days.
+        $pdo->exec('BEGIN IMMEDIATE');
+        try {
+            if ((int) $pdo->query('PRAGMA user_version')->fetchColumn() < 5) {
+                $pdo->exec("
+                    CREATE TABLE events (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT, board_id INTEGER NOT NULL DEFAULT 1,
+                        title TEXT NOT NULL, day_from TEXT NOT NULL, day_to TEXT NOT NULL,
+                        start INTEGER, \"end\" INTEGER, location TEXT NOT NULL DEFAULT '',
+                        project_id INTEGER REFERENCES projects(id) ON DELETE SET NULL,
+                        notes TEXT NOT NULL DEFAULT '', subs TEXT NOT NULL DEFAULT '[]', created_at TEXT NOT NULL);
+                    CREATE INDEX events_board_day ON events(board_id, day_from);
+                    CREATE TABLE cal_range_cache (k TEXT PRIMARY KEY, json TEXT NOT NULL, fetched_at INTEGER NOT NULL);
+                    PRAGMA user_version = 5;
+                ");
+            }
+            $pdo->exec('COMMIT');
+        } catch (Throwable $e) {
+            $pdo->exec('ROLLBACK');
+            throw $e;
+        }
+    }
     return $pdo;
 }
 

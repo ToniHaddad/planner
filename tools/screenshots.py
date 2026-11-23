@@ -36,6 +36,15 @@ EVENTS = [
     {"title": "Lunch with Maya", "start": 12 * 60 + 30, "end": 13 * 60 + 30, "calendar": "Personal"},
     {"title": "Client call", "start": 15 * 60, "end": 16 * 60, "calendar": "Work"},
 ]
+# Google events of other days, for the Calendar page: (days from today, timed events, all-day events)
+RANGE_EVENTS = [
+    (0, EVENTS, [{"title": "Maya's birthday", "calendar": "Personal"}]),
+    (2, [{"title": "Dentist", "start": 8 * 60 + 30, "end": 9 * 60, "calendar": "Personal"}], []),
+    (6, [{"title": "Quarterly review", "start": 14 * 60, "end": 15 * 60, "calendar": "Work"}], []),
+    (9, [{"title": "Team stand-up", "start": 9 * 60 + 30, "end": 10 * 60, "calendar": "Work"}], []),
+    (12, [], [{"title": "Public holiday", "calendar": "Holidays"}]),
+    (-4, [{"title": "Client call", "start": 15 * 60, "end": 16 * 60, "calendar": "Work"}], []),
+]
 
 
 class Bridge(http.server.BaseHTTPRequestHandler):
@@ -54,6 +63,13 @@ class Bridge(http.server.BaseHTTPRequestHandler):
         q = dict(urllib.parse.parse_qsl(urllib.parse.urlparse(self.path).query))
         if q.get("action") == "ping":
             return self.send({"ok": True, "tz": "Europe/Paris", "calendars": ["Work", "Personal"]})
+        if q.get("action") == "range":
+            days = {}
+            for n, timed, all_day in RANGE_EVENTS:
+                d = (date.today() + timedelta(days=n)).isoformat()
+                if q["from"] <= d <= q["to"]:
+                    days[d] = {"events": timed, "allDay": all_day}
+            return self.send({"ok": True, "tz": "Europe/Paris", "days": days})
         today = q.get("date") == date.today().isoformat()
         self.send({"ok": True, "tz": "Europe/Paris", "events": EVENTS if today else [],
                    "allDay": [{"title": "Maya's birthday", "calendar": "Personal"}] if today else []})
@@ -91,6 +107,25 @@ def seed(c):
     add("Review pull requests", 1, where="also", day=today, start=8 * 60, dur=60, done=True)
     add("Practise Spanish", 3, where="also", day=today, start=16 * 60 + 30, dur=30)
     add("Pay the electricity bill", 4, where="also", day=today, dur=15)
+    later = lambda n: (date.today() + timedelta(days=n)).isoformat()
+    add("Order the workshop materials", 1, where="top", slot=0, day=later(1))
+    add("Confirm the caterer", 1, where="also", day=later(2))
+    add("Pack the demo kit", 1, where="top", slot=0, day=later(3), start=9 * 60)
+    add("Label the boxes", 4, where="also", day=later(7))
+
+    def event(title, start_in, project, days=1, **more):
+        c.api("event_add", dict({"title": title, "from": later(start_in), "to": later(start_in + days - 1), "p": project}, **more))
+
+    event("Supplier visit", 0, 1, start=16 * 60 + 30, end=17 * 60 + 30, location="Main warehouse",
+          subs=[sub("Print the order list", True), sub("Book a meeting room"), sub("Safety vests")])
+    event("Design workshop", 3, 1, days=2, location="Riverside studio, room 2",
+          subs=[sub("Book the room", True), sub("Send the invitations", True), sub("Order lunch"),
+                sub("Print the handouts"), sub("Bring the projector")])
+    event("Office move", 8, 4, location="12 Harbour Street",
+          subs=[sub("Hire the van"), sub("Tell the post office"), sub("Pack the archive")])
+    event("Volunteer training weekend for the new community kitchen team", 10, 2, days=2, location="Community hall")
+    event("Trade fair", 15, 1, days=3, location="Exhibition centre, hall 4",
+          subs=[sub("Stand booked", True), sub("Flyers", True)])
     return report
 
 
@@ -147,6 +182,14 @@ def main():
                 page.wait_for_timeout(4200)          # let the "Connected" message fade
                 page.mouse.move(5, 5)
                 page.screenshot(path=str(OUT / f"board-{scheme}.png"))
+                # the Calendar page: this month, with "Coming up" beside it
+                page.click("[data-act=page][data-page=calendar]")
+                page.wait_for_selector("#cal-grid .cell .ev")
+                page.wait_for_selector("#cal-grid .gev")
+                page.wait_for_selector("#up .up-row")
+                page.wait_for_timeout(300)
+                page.mouse.move(5, 5)
+                page.screenshot(path=str(OUT / f"calendar-{scheme}.png"))
                 ctx.close()
             browser.close()
     finally:

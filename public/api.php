@@ -26,7 +26,7 @@ if (!logged_in()) fail('Signed out', 401);
 
 $action = (string) ($_GET['action'] ?? '');
 $isPost = $_SERVER['REQUEST_METHOD'] === 'POST';
-$readOnly = ['state', 'calendar', 'bridge_code'];
+$readOnly = ['state', 'calendar', 'bridge_code', 'events', 'month'];
 if (in_array($action, $readOnly, true) === $isPost) fail('Wrong method', 405);
 $in = [];
 if ($isPost) {
@@ -116,11 +116,108 @@ function clean_board_name($v): string
     return $n;
 }
 
-function clean_title($v): string
+function clean_title($v, string $empty = 'A task needs a title'): string
 {
-    $t = trim(preg_replace('/\s+/u', ' ', (string) $v));
-    if ($t === '') fail('A task needs a title');
+    $t = trim(preg_replace('/\s+/u', ' ', is_scalar($v) ? (string) $v : ''));
+    if ($t === '') fail($empty);
     return mb_substr($t, 0, 300);
+}
+
+// ---------- events ----------
+const EVENT_MAX_DAYS = 60;     // how long one event may last
+const RANGE_MAX_DAYS = 62;     // how many days one request may ask for (a month view needs up to 42)
+
+/** Days from $a to $b (negative when $b comes first). Noon UTC keeps clock changes out of it. */
+function days_between(string $a, string $b): int
+{
+    return (int) round((strtotime($b . ' 12:00 UTC') - strtotime($a . ' 12:00 UTC')) / 86400);
+}
+
+function event_out(array $r): array
+{
+    return [
+        'id' => (int) $r['id'], 'board' => (int) $r['board_id'], 'title' => $r['title'],
+        'from' => $r['day_from'], 'to' => $r['day_to'],
+        'start' => $r['start'] === null ? null : (int) $r['start'],
+        'end' => $r['end'] === null ? null : (int) $r['end'],
+        'location' => (string) $r['location'],
+        'p' => $r['project_id'] === null ? null : (int) $r['project_id'],
+        'notes' => (string) $r['notes'],
+        'subs' => json_decode((string) $r['subs'], true) ?: [],
+    ];
+}
+
+function get_event(int $id): array
+{
+    $st = db()->prepare('SELECT * FROM events WHERE id = ?');
+    $st->execute([$id]);
+    $row = $st->fetch();
+    if (!$row) fail('That event no longer exists', 404);
+    return $row;
+}
+
+/** A start or end time: null, or whole minutes from midnight (0-1440). */
+function clean_minute($v): ?int
+{
+    if ($v === null) return null;
+    if (!is_int($v) || $v < 0 || $v > 1440) fail('Bad time');
+    return $v;
+}
+
+/**
+ * Applies the fields in $in to the event row $e, then checks the row as a whole, since a
+ * change to one field (the end date) can make another (the time) wrong.
+ */
+function event_apply(array $e, array $in): array
+{
+    if (array_key_exists('title', $in)) $e['title'] = clean_title($in['title'], 'An event needs a title');
+    foreach (['from' => 'day_from', 'to' => 'day_to'] as $k => $col) {
+        if (!array_key_exists($k, $in)) continue;
+        if (!valid_day($in[$k])) fail('Bad day');
+        $e[$col] = $in[$k];
+    }
+    if (array_key_exists('start', $in)) $e['start'] = clean_minute($in['start']);
+    if (array_key_exists('end', $in)) $e['end'] = clean_minute($in['end']);
+    if (array_key_exists('location', $in)) {
+        if ($in['location'] !== null && !is_string($in['location'])) fail('Bad location');
+        $e['location'] = mb_substr(trim(preg_replace('/\s+/u', ' ', (string) $in['location'])), 0, 200);
+    }
+    if (array_key_exists('p', $in)) $e['project_id'] = is_int($in['p']) ? $in['p'] : null;
+    if (array_key_exists('notes', $in)) $e['notes'] = clean_notes($in['notes']);
+    if (array_key_exists('subs', $in)) $e['subs'] = clean_subs($in['subs']);
+    // A project belongs to one board: an event keeps it only when it is one of its board's.
+    if ($e['project_id'] !== null && !project_exists($e['project_id'], (int) $e['board_id'])) $e['project_id'] = null;
+    if (!valid_day($e['day_from']) || !valid_day($e['day_to'])) fail('Bad day');
+    $len = days_between($e['day_from'], $e['day_to']);
+    if ($len < 0) fail('The end date is before the start date');
+    if ($len >= EVENT_MAX_DAYS) fail('An event can last at most ' . EVENT_MAX_DAYS . ' days');
+    if (($e['start'] === null) !== ($e['end'] === null)) fail('Give both a start and an end time');
+    if ($e['start'] !== null) {
+        if ($len > 0) fail('Only a one-day event can have a time');
+        if ($e['start'] >= $e['end']) fail('The end time must be after the start time');
+    }
+    return $e;
+}
+
+/** The from/to days of a read-only request, checked: valid, in order, and not too many. */
+function range_param(): array
+{
+    $from = $_GET['from'] ?? '';
+    $to = $_GET['to'] ?? '';
+    if (!valid_day($from) || !valid_day($to)) fail('Bad day');
+    $len = days_between($from, $to);
+    if ($len < 0) fail('The end date is before the start date');
+    if ($len >= RANGE_MAX_DAYS) fail('Ask for at most ' . RANGE_MAX_DAYS . ' days at a time');
+    return [$from, $to];
+}
+
+/** The board's events that cover any day from $from to $to: all-day ones first on each start day. */
+function events_in(int $board, string $from, string $to): array
+{
+    $st = db()->prepare('SELECT * FROM events WHERE board_id = ? AND day_from <= ? AND day_to >= ?
+                         ORDER BY day_from, start IS NOT NULL, start, id');
+    $st->execute([$board, $to, $from]);
+    return array_map('event_out', $st->fetchAll());
 }
 
 function clean_color($v): string
@@ -153,6 +250,7 @@ switch ($action) {
                     return $ps->fetchAll();
                 })()),
             'tasks' => array_map('task_out', $st->fetchAll()),
+            'events' => events_in($board, $day, $day),
             'settings' => day_hours(),
             'calendarConnected' => (bool) setting('bridge_url'),
             'user' => local_mode() ? '' : credentials()['username'],
@@ -173,6 +271,49 @@ switch ($action) {
         $day = $_GET['day'] ?? '';
         if (!valid_day($day)) fail('Bad day');
         reply(calendar_day($day, ($_GET['refresh'] ?? '') === '1'));
+
+    case 'events':
+        [$from, $to] = range_param();
+        reply(['events' => events_in(board_id($_GET['board'] ?? 0), $from, $to)]);
+
+    case 'month':
+        // Everything the Calendar page shows for the days in view, in one request.
+        [$from, $to] = range_param();
+        $board = board_id($_GET['board'] ?? 0);
+        $st = $pdo->prepare("SELECT * FROM tasks WHERE board_id = ? AND day BETWEEN ? AND ?
+                             ORDER BY day, place <> 'top', slot, start IS NULL, start, id");
+        $st->execute([$board, $from, $to]);
+        $tasks = array_map(fn($t) => ['id' => $t['id'], 'title' => $t['title'], 'day' => $t['day'], 'where' => $t['where'],
+                                      'slot' => $t['slot'], 'start' => $t['start'], 'dur' => $t['dur'], 'done' => $t['done'],
+                                      'p' => $t['p']], array_map('task_out', $st->fetchAll()));
+        reply(['events' => events_in($board, $from, $to), 'tasks' => $tasks,
+               'google' => calendar_range($from, $to, ($_GET['refresh'] ?? '') === '1')]);
+
+    case 'event_add':
+        $board = board_id($in['board'] ?? 0);
+        if (!array_key_exists('to', $in)) $in['to'] = $in['from'] ?? null;     // a one-day event unless told otherwise
+        $e = event_apply(['board_id' => $board, 'title' => '', 'day_from' => '', 'day_to' => '', 'start' => null,
+                          'end' => null, 'location' => '', 'project_id' => null, 'notes' => '', 'subs' => '[]'],
+                         ['title' => $in['title'] ?? ''] + $in);
+        $pdo->prepare('INSERT INTO events (board_id, title, day_from, day_to, start, "end", location, project_id, notes, subs, created_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
+            ->execute([$board, $e['title'], $e['day_from'], $e['day_to'], $e['start'], $e['end'], $e['location'],
+                       $e['project_id'], $e['notes'], $e['subs'], gmdate('c')]);
+        reply(['event' => event_out(get_event((int) $pdo->lastInsertId()))]);
+
+    case 'event_update':
+        $e = get_event((int) ($in['id'] ?? 0));
+        if (!is_array($in['patch'] ?? null)) fail('Bad change');
+        $patch = array_intersect_key($in['patch'], array_flip(['title', 'from', 'to', 'start', 'end', 'location', 'p', 'notes', 'subs']));
+        $e = event_apply($e, $patch);
+        $pdo->prepare('UPDATE events SET title=?, day_from=?, day_to=?, start=?, "end"=?, location=?, project_id=?, notes=?, subs=? WHERE id=?')
+            ->execute([$e['title'], $e['day_from'], $e['day_to'], $e['start'], $e['end'], $e['location'], $e['project_id'],
+                       $e['notes'], $e['subs'], $e['id']]);
+        reply(['event' => event_out(get_event((int) $e['id']))]);
+
+    case 'event_delete':
+        $pdo->prepare('DELETE FROM events WHERE id = ?')->execute([(int) ($in['id'] ?? 0)]);
+        reply(['ok' => true]);
 
     case 'bridge_code':
         $code = (string) file_get_contents(__DIR__ . '/lib/bridge.gs.txt');
@@ -273,6 +414,7 @@ switch ($action) {
         $st = $pdo->prepare("UPDATE tasks SET board_id = ?, place = 'dump', day = NULL, start = NULL, slot = NULL WHERE board_id = ?");
         $st->execute([$rest[0], $id]);
         $pdo->prepare('UPDATE projects SET board_id = ? WHERE board_id = ?')->execute([$rest[0], $id]);
+        $pdo->prepare('UPDATE events SET board_id = ? WHERE board_id = ?')->execute([$rest[0], $id]);
         $pdo->prepare('DELETE FROM boards WHERE id = ?')->execute([$id]);
         $pdo->exec('COMMIT');
         reply(['boards' => boards(), 'moved' => $st->rowCount(), 'to' => $rest[0]]);
@@ -337,12 +479,12 @@ switch ($action) {
             fail($e->getMessage());
         }
         set_setting('bridge_url', $url);
-        $pdo->exec('DELETE FROM cal_cache');
+        $pdo->exec('DELETE FROM cal_cache; DELETE FROM cal_range_cache');
         reply(['ok' => true, 'calendars' => $ping['calendars'] ?? [], 'tz' => $ping['tz'] ?? '']);
 
     case 'calendar_disconnect':
         set_setting('bridge_url', null);
-        $pdo->exec('DELETE FROM cal_cache');
+        $pdo->exec('DELETE FROM cal_cache; DELETE FROM cal_range_cache');
         reply(['ok' => true]);
 
     case 'calendar_push':

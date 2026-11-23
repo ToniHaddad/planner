@@ -25,6 +25,7 @@ function doGet(e) {
   try {
     if (p.action === 'ping') return out_(ping_());
     if (p.action === 'events') return out_(events_(p.date));
+    if (p.action === 'range') return out_(range_(p.from, p.to));
     return out_({ error: 'unknown action' });
   } catch (err) {
     return out_({ error: String((err && err.message) || err) });
@@ -94,6 +95,53 @@ function events_(date) {
   });
   events.sort(function (x, y) { return x.start - y.start; });
   return { ok: true, tz: b.tz, date: date, events: events, allDay: allDay };
+}
+
+/**
+ * Every day from `from` to `to` (at most 62) in one go, for the planner's Calendar page.
+ * One read per calendar, then each event is split over the days it covers, clipped to each
+ * day the same way events_ clips it to one.
+ */
+function range_(from, to) {
+  const first = dayBounds_(from), last = dayBounds_(to), tz = first.tz;
+  if (last.start.getTime() < first.start.getTime()) throw new Error('bad range');
+  // midnight at the start of each day; not every day is 24 hours long
+  const keys = [], starts = [];
+  let d = first.start;
+  while (d.getTime() <= last.start.getTime()) {
+    if (keys.length >= 62) throw new Error('range too long');
+    keys.push(Utilities.formatDate(d, tz, 'yyyy-MM-dd'));
+    starts.push(d);
+    d = Utilities.parseDate(Utilities.formatDate(new Date(d.getTime() + 36 * 3600000), tz, 'yyyy-MM-dd') + ' 00:00', tz, 'yyyy-MM-dd HH:mm');
+  }
+  starts.push(last.end);
+  const days = {};
+  keys.forEach(function (k) { days[k] = { events: [], allDay: [] }; });
+  const scriptTz = Session.getScriptTimeZone();
+  readCalendars_().forEach(function (cal) {
+    const name = cal.getName(), color = cal.getColor();
+    cal.getEvents(first.start, last.end).forEach(function (ev) {
+      try { if (ev.getMyStatus() === CalendarApp.GuestStatus.NO) return; } catch (err) { /* not a guest */ }
+      const title = ev.getTitle() || '(busy)';
+      if (ev.isAllDayEvent()) {
+        // all-day dates are midnight in the script's time zone; the end date is the day after the last
+        const a = Utilities.formatDate(ev.getAllDayStartDate(), scriptTz, 'yyyy-MM-dd');
+        const b = Utilities.formatDate(ev.getAllDayEndDate(), scriptTz, 'yyyy-MM-dd');
+        keys.forEach(function (k) { if (k >= a && (k < b || (k === a && a === b))) days[k].allDay.push({ title: title, calendar: name, color: color }); });
+        return;
+      }
+      const evStart = ev.getStartTime().getTime(), evEnd = ev.getEndTime().getTime();
+      keys.forEach(function (k, i) {
+        const day0 = starts[i].getTime();
+        if (evStart >= starts[i + 1].getTime() || evEnd <= day0) return;
+        const s = Math.max(0, Math.round((evStart - day0) / 60000));
+        const e = Math.min(1440, Math.round((evEnd - day0) / 60000));
+        if (e > s) days[k].events.push({ title: title, start: s, end: e, calendar: name, color: color });
+      });
+    });
+  });
+  keys.forEach(function (k) { days[k].events.sort(function (x, y) { return x.start - y.start; }); });
+  return { ok: true, tz: tz, from: from, to: to, days: days };
 }
 
 function nearestColor_(hex) {

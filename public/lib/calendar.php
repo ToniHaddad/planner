@@ -59,6 +59,68 @@ function bridge_call(string $url, array $query, ?array $post = null): array
     return $data;
 }
 
+/** One day of the bridge's answer, trimmed to what the board shows: {events, allDay}. */
+function clean_cal_day($data): array
+{
+    $clean = ['events' => [], 'allDay' => []];
+    if (!is_array($data)) return $clean;
+    foreach ((is_array($data['events'] ?? null) ? $data['events'] : []) as $e) {
+        if (!is_array($e)) continue;
+        $clean['events'][] = [
+            'title' => mb_substr((string) ($e['title'] ?? ''), 0, 200),
+            'start' => max(0, min(1440, (int) ($e['start'] ?? 0))),
+            'end' => max(0, min(1440, (int) ($e['end'] ?? 0))),
+            'calendar' => mb_substr((string) ($e['calendar'] ?? ''), 0, 100),
+        ];
+    }
+    foreach ((is_array($data['allDay'] ?? null) ? $data['allDay'] : []) as $e) {
+        if (!is_array($e)) continue;
+        $clean['allDay'][] = ['title' => mb_substr((string) ($e['title'] ?? ''), 0, 200),
+            'calendar' => mb_substr((string) ($e['calendar'] ?? ''), 0, 100)];
+    }
+    return $clean;
+}
+
+/**
+ * Events for every day from $from to $to, in one call to the bridge (the Calendar page):
+ * {connected, days: {"YYYY-MM-DD": {events, allDay}}, fetchedAt, needsUpdate?, error?}.
+ * Cached for ten minutes. Google trouble never fails the caller: it comes back as a field.
+ */
+function calendar_range(string $from, string $to, bool $refresh = false): array
+{
+    $url = setting('bridge_url');
+    if (!$url) return ['connected' => false];
+    $pdo = db();
+    $k = $from . '/' . $to;
+    $st = $pdo->prepare('SELECT json, fetched_at FROM cal_range_cache WHERE k = ?');
+    $st->execute([$k]);
+    $hit = $st->fetch();
+    if ($hit && !$refresh && time() - (int) $hit['fetched_at'] < CAL_CACHE_SECONDS) {
+        return ['connected' => true, 'fetchedAt' => (int) $hit['fetched_at'], 'days' => (object) json_decode($hit['json'], true)];
+    }
+    try {
+        $data = bridge_call($url, ['action' => 'range', 'from' => $from, 'to' => $to]);
+        $days = [];
+        foreach ((is_array($data['days'] ?? null) ? $data['days'] : []) as $day => $d) {
+            $day = (string) $day;
+            if (preg_match('/^\d{4}-\d{2}-\d{2}$/', $day) && $day >= $from && $day <= $to) $days[$day] = clean_cal_day($d);
+        }
+        $pdo->prepare('INSERT INTO cal_range_cache (k, json, fetched_at) VALUES (?, ?, ?)
+                       ON CONFLICT(k) DO UPDATE SET json = excluded.json, fetched_at = excluded.fetched_at')
+            ->execute([$k, json_encode((object) $days), time()]);
+        $pdo->prepare('DELETE FROM cal_range_cache WHERE fetched_at < ?')->execute([time() - 14 * 86400]);
+        return ['connected' => true, 'fetchedAt' => time(), 'days' => (object) $days];
+    } catch (Throwable $e) {
+        // A script pasted before ranges existed does not know the action: the owner has to paste it again.
+        if ($e->getMessage() === 'Calendar bridge: unknown action') {
+            return ['connected' => true, 'needsUpdate' => true, 'days' => (object) []];
+        }
+        // Show the last good copy (if any) with the error, as calendar_day does.
+        return ['connected' => true, 'error' => $e->getMessage(), 'fetchedAt' => $hit ? (int) $hit['fetched_at'] : null,
+                'days' => (object) ($hit ? json_decode($hit['json'], true) : [])];
+    }
+}
+
 /** Events for one day: {connected, events, allDay, fetchedAt, error?}. Cached for ten minutes. */
 function calendar_day(string $day, bool $refresh): array
 {
@@ -73,19 +135,7 @@ function calendar_day(string $day, bool $refresh): array
     }
     try {
         $data = bridge_call($url, ['action' => 'events', 'date' => $day]);
-        $clean = ['events' => [], 'allDay' => [], 'tz' => (string) ($data['tz'] ?? '')];
-        foreach (($data['events'] ?? []) as $e) {
-            $clean['events'][] = [
-                'title' => mb_substr((string) ($e['title'] ?? ''), 0, 200),
-                'start' => max(0, min(1440, (int) ($e['start'] ?? 0))),
-                'end' => max(0, min(1440, (int) ($e['end'] ?? 0))),
-                'calendar' => mb_substr((string) ($e['calendar'] ?? ''), 0, 100),
-            ];
-        }
-        foreach (($data['allDay'] ?? []) as $e) {
-            $clean['allDay'][] = ['title' => mb_substr((string) ($e['title'] ?? ''), 0, 200),
-                'calendar' => mb_substr((string) ($e['calendar'] ?? ''), 0, 100)];
-        }
+        $clean = clean_cal_day($data) + ['tz' => (string) ($data['tz'] ?? '')];
         $pdo->prepare('INSERT INTO cal_cache (day, json, fetched_at) VALUES (?, ?, ?)
                        ON CONFLICT(day) DO UPDATE SET json = excluded.json, fetched_at = excluded.fetched_at')
             ->execute([$day, json_encode($clean), time()]);

@@ -41,6 +41,9 @@ def check(name, cond, detail=""):
 
 class Bridge(http.server.BaseHTTPRequestHandler):
     key = None
+    knows_range = True       # False acts like a script pasted before the Calendar page existed
+    range_error = None       # an error the bridge reports for a range
+    range_calls = 0
 
     def log_message(self, *a):
         pass
@@ -59,6 +62,19 @@ class Bridge(http.server.BaseHTTPRequestHandler):
             return self.send({"error": "forbidden"})
         if q.get("action") == "ping":
             return self.send({"ok": True, "tz": "Europe/Paris", "calendars": ["Main", "Outlook"]})
+        if q.get("action") == "range":
+            Bridge.range_calls += 1
+            if not Bridge.knows_range:
+                return self.send({"error": "unknown action"})
+            if Bridge.range_error:
+                return self.send({"error": Bridge.range_error})
+            today = date.today().isoformat()
+            days = {q["from"]: {"events": [], "allDay": [{"title": "Range start", "calendar": "Main"}]},
+                    "1999-01-01": {"events": [], "allDay": [{"title": "Outside the range", "calendar": "Main"}]}}
+            if q["from"] <= today <= q["to"]:
+                days[today] = {"events": [{"title": "Team <b>call</b>", "start": 600, "end": 660, "calendar": "Main"}],
+                               "allDay": [{"title": "Holiday", "calendar": "Main"}]}
+            return self.send({"ok": True, "tz": "Europe/Paris", "days": days})
         self.send({"ok": True, "tz": "Europe/Paris", "events": [
             {"title": "Team <b>call</b>", "start": 600, "end": 660, "calendar": "Main", "color": "#fff"}],
             "allDay": [{"title": "Holiday", "calendar": "Main"}]})
@@ -268,6 +284,7 @@ def run(site):
     check("deleting a project keeps its tasks", any(x["id"] == t["id"] and x["p"] is None for x in st["tasks"]))
 
     run_boards(c, today)
+    run_events(c, today)
 
     # --- calendar ---
     _, cal = c.api("calendar", day=today)
@@ -287,6 +304,8 @@ def run(site):
           and pushed[-1]["blocks"][0]["start"] == 480 and pushed[-1]["date"] == today, str(r))
     status, code = c.api("bridge_code")
     check("bridge script carries the key", status == 200 and Bridge.key in code["code"] and "__BRIDGE_KEY__" not in code["code"])
+    check("bridge script answers ranges", "action === 'range'" in code["code"])
+    run_month_google(c, today)
 
     # --- files that must never be served (PHP's dev server has no .htaccess, so check the rules exist) ---
     ht = (site / ".htaccess").read_text()
@@ -334,7 +353,10 @@ def run(site):
     check("password boxes sit in #pw-form with a user name input", form is not None and 'id="pw-cur"' in form.group(0)
           and 'id="pw-new"' in form.group(0) and 'autocomplete="username"' in form.group(0))
     forms = re.findall(r'<form.*?</form>', html, re.S)
-    check("the brain dump input is in no form", 'id="new"' in html and not any('id="new"' in f for f in forms))
+    own = [f for f in forms if 'id="new"' in f]
+    check("the brain dump box sits in a form of its own, away from any password box",
+          len(own) == 1 and 'type="password"' not in own[0] and 'type="submit"' in own[0])
+    check("every password box is in the password form", html.count('type="password"') == form.group(0).count('type="password"'))
 
     # --- logout and lockout ---
     c.api("logout", {})
@@ -506,6 +528,276 @@ def run_boards(c, today):
     check("boards: the test tasks are cleaned up", sorted(x["title"] for x in st["tasks"]) == base_titles, str(st["tasks"]))
 
 
+def run_events(c, today):
+    """Events: the board's own entries over one or more days. Leaves no events and no extra boards behind."""
+    d = date.today()
+
+    def day(n):
+        return (d + timedelta(days=n)).isoformat()
+    _, st = c.api("state", day=today)
+    first = st["board"]
+    pid = st["projects"][0]["id"]
+    check("events: state lists the day's events, none yet", st.get("events") == [], str(st.get("events")))
+
+    # access
+    status, _ = c.api("event_add", {"title": "x", "from": today}, csrf=False)
+    check("events: adding without the CSRF token is refused", status == 403)
+    status, _ = c.api("event_add", None, title="x", **{"from": today})
+    check("events: adding with a GET is refused", status == 405)
+    status, _ = c.api("events", {"from": today, "to": today})
+    check("events: reading with a POST is refused", status == 405)
+    status, _ = c.api("month", {"from": today, "to": today})
+    check("events: the month cannot be read with a POST", status == 405)
+
+    # adding
+    status, r = c.api("event_add", {"title": "  Design   <b>workshop</b> ", "from": day(10), "to": day(11),
+                                    "location": "  Hall   B ", "p": pid, "notes": "a\r\nb",
+                                    "subs": [{"title": " Book  the room ", "done": True}, {"title": ""}, {"title": "Print badges"}]})
+    w = r.get("event", {})
+    check("events: an event is added, title and place tidied", status == 200 and w.get("title") == "Design <b>workshop</b>"
+          and w.get("location") == "Hall B" and w.get("from") == day(10) and w.get("to") == day(11), str(r))
+    check("events: it is all-day, on the first board, with its project", w.get("start") is None and w.get("end") is None
+          and w.get("board") == first and w.get("p") == pid, str(w))
+    check("events: notes and the checklist are kept like a task's", w.get("notes") == "a\nb"
+          and w.get("subs") == [{"title": "Book the room", "done": True}, {"title": "Print badges", "done": False}], str(w))
+    check("events: the answer has exactly the agreed fields", set(w) == {"id", "board", "title", "from", "to", "start", "end",
+          "location", "p", "notes", "subs"}, str(sorted(w)))
+    status, r = c.api("event_add", {"title": "One day", "from": day(12)})
+    one = r.get("event", {})
+    check("events: without a To date the event lasts one day", status == 200 and one.get("to") == day(12)
+          and one.get("location") == "" and one.get("subs") == [] and one.get("notes") == "", str(r))
+    status, r = c.api("event_add", {"title": "Late", "from": day(12), "start": 23 * 60, "end": 1440})
+    late = r.get("event", {})
+    check("events: a timed event may end at midnight (1440)", status == 200 and late.get("start") == 1380 and late.get("end") == 1440, str(r))
+    status, r = c.api("event_add", {"title": "é" * 400, "from": day(12), "location": "ü" * 300})
+    long = r.get("event", {})
+    check("events: a long title is cut at 300 and a long place at 200", status == 200 and long.get("title") == "é" * 300
+          and long.get("location") == "ü" * 200, str(r)[:200])
+    status, r = c.api("event_add", {"title": "Sixty days", "from": day(1), "to": day(60)})
+    sixty = r.get("event", {})
+    check("events: an event of 60 days is accepted", status == 200 and sixty.get("to") == day(60), str(r))
+
+    bad_adds = [
+        ({"title": "   ", "from": today}, "An event needs a title"),
+        ({"title": "x"}, "Bad day"),
+        ({"title": "x", "from": "2026-02-30"}, "Bad day"),
+        ({"title": "x", "from": today, "to": "soon"}, "Bad day"),
+        ({"title": "x", "from": day(5), "to": day(4)}, "The end date is before the start date"),
+        ({"title": "x", "from": day(1), "to": day(61)}, "An event can last at most 60 days"),
+        ({"title": "x", "from": today, "start": 600}, "Give both a start and an end time"),
+        ({"title": "x", "from": today, "end": 600}, "Give both a start and an end time"),
+        ({"title": "x", "from": today, "to": day(1), "start": 600, "end": 660}, "Only a one-day event can have a time"),
+        ({"title": "x", "from": today, "start": 660, "end": 660}, "The end time must be after the start time"),
+        ({"title": "x", "from": today, "start": 700, "end": 660}, "The end time must be after the start time"),
+        ({"title": "x", "from": today, "start": -5, "end": 60}, "Bad time"),
+        ({"title": "x", "from": today, "start": 60, "end": 1441}, "Bad time"),
+        ({"title": "x", "from": today, "start": "600", "end": 660}, "Bad time"),
+        ({"title": "x", "from": today, "location": 5}, "Bad location"),
+        ({"title": "x", "from": today, "notes": 5}, "Bad notes"),
+        ({"title": "x", "from": today, "subs": "Book"}, "Bad subtasks"),
+        ({"title": "x", "from": today, "subs": [{"title": str(i)} for i in range(51)]}, "Bad subtasks"),
+    ]
+    for body, msg in bad_adds:
+        status, r = c.api("event_add", body)
+        shown = {k: v for k, v in body.items() if k != "subs"}
+        check(f"events: refused with 400 ({msg}): {shown}", status == 400 and r.get("error") == msg, str(r))
+
+    # projects belong to one board
+    _, r = c.api("board_add", {"name": "Second"})
+    b2 = r["board"]["id"]
+    _, r = c.api("project_add", {"name": "Theirs", "color": "#123456", "board": b2})
+    p2 = r["project"]["id"]
+    _, r = c.api("event_add", {"title": "Wrong project", "from": day(3), "p": p2})
+    check("events: a project of another board is dropped", r["event"]["p"] is None and r["event"]["board"] == first, str(r))
+    stray = [r["event"]["id"]]
+    _, r = c.api("event_add", {"title": "No such project", "from": day(3), "p": 99999})
+    check("events: an unknown project is dropped", r["event"]["p"] is None, str(r))
+    stray.append(r["event"]["id"])
+
+    # changing
+    status, r = c.api("event_update", {"id": one["id"], "patch": {"title": " Renamed ", "location": "Depot", "p": pid}})
+    check("events: a change is saved", status == 200 and r["event"]["title"] == "Renamed" and r["event"]["location"] == "Depot"
+          and r["event"]["p"] == pid and r["event"]["from"] == day(12), str(r))
+    status, r = c.api("event_update", {"id": one["id"], "patch": {"start": 540, "end": 600}})
+    check("events: a one-day event can get a time", status == 200 and r["event"]["start"] == 540 and r["event"]["end"] == 600, str(r))
+    status, r = c.api("event_update", {"id": one["id"], "patch": {"to": day(13)}})
+    check("events: making a timed event longer than a day is refused as a whole",
+          status == 400 and r.get("error") == "Only a one-day event can have a time", str(r))
+    status, r = c.api("event_update", {"id": one["id"], "patch": {"to": day(13), "start": None, "end": None}})
+    check("events: ...but works together with clearing the time", status == 200 and r["event"]["to"] == day(13)
+          and r["event"]["start"] is None, str(r))
+    status, r = c.api("event_update", {"id": one["id"], "patch": {"from": day(14)}})
+    check("events: moving the start past the end is refused", status == 400
+          and r.get("error") == "The end date is before the start date", str(r))
+    status, r = c.api("event_update", {"id": one["id"], "patch": {"from": day(14), "to": day(15)}})
+    check("events: moving both dates keeps the length", status == 200 and (r["event"]["from"], r["event"]["to"]) == (day(14), day(15)), str(r))
+    status, r = c.api("event_update", {"id": one["id"], "patch": {"subs": [{"title": "Van", "done": False}], "notes": "Gate 3"}})
+    check("events: the checklist and notes can be changed", status == 200 and r["event"]["subs"] == [{"title": "Van", "done": False}]
+          and r["event"]["notes"] == "Gate 3", str(r))
+    status, r = c.api("event_update", {"id": one["id"], "patch": {"board": b2, "id": 5}})
+    check("events: fields that are not the event's own are ignored", status == 200 and r["event"]["board"] == first
+          and r["event"]["id"] == one["id"], str(r))
+    status, r = c.api("event_update", {"id": one["id"], "patch": {"title": ""}})
+    check("events: an empty title is refused on change", status == 400 and r.get("error") == "An event needs a title", str(r))
+    status, r = c.api("event_update", {"id": one["id"], "patch": "title"})
+    check("events: a change that is not a list of fields is refused", status == 400, str(r))
+    status, r = c.api("event_update", {"id": 99999, "patch": {"title": "Ghost"}})
+    check("events: changing an unknown event gives 404", status == 404, str(r))
+    status, _ = c.api("event_update", {"id": one["id"], "patch": {"title": "x"}}, csrf=False)
+    check("events: changing without the CSRF token is refused", status == 403)
+
+    # reading a range: every event that touches it
+    def titles(f, t, board=None):
+        params = {"from": f, "to": t}
+        if board is not None:
+            params["board"] = board
+        status, r = c.api("events", **params)
+        return [e["title"] for e in r.get("events", [])]
+    w_title = w["title"]
+    check("events: a range ending on an event's first day includes it", w_title in titles(day(5), day(10)))
+    check("events: a range starting on an event's last day includes it", w_title in titles(day(11), day(20)))
+    check("events: a range inside a multi-day event includes it", w_title in titles(day(11), day(11)))
+    check("events: a range just before it leaves it out", w_title not in titles(day(5), day(9)))
+    check("events: a range just after it leaves it out", w_title not in titles(day(12), day(13)))
+    status, r = c.api("events", **{"from": day(12), "to": day(12)})
+    got = [(e["title"], e["start"]) for e in r["events"]]
+    check("events: all-day events come first (by start day), then timed ones by start",
+          [x for x in got if x[0] in ("Late", "é" * 300, "Sixty days")] == [("Sixty days", None), ("é" * 300, None), ("Late", 1380)], str(got))
+    for params, why in (({"from": day(5), "to": day(4)}, "a range that ends before it starts"),
+                        ({"from": day(0), "to": day(62)}, "a range of 63 days"),
+                        ({"from": "2026-13-01", "to": day(1)}, "a bad day"),
+                        ({"from": day(0)}, "a missing end")):
+        status, r = c.api("events", **params)
+        check(f"events: reading {why} is refused", status == 400, str(r))
+    status, _ = c.api("events", **{"from": day(0), "to": day(61)})
+    check("events: a range of 62 days is fine", status == 200)
+
+    # boards
+    _, r = c.api("event_add", {"title": "On two", "from": day(10), "board": b2})
+    on2 = r["event"]
+    check("events: an event can be added to another board", on2["board"] == b2, str(on2))
+    check("events: it does not show on the first board", "On two" not in titles(day(10), day(10)))
+    check("events: it shows on its own board, alone", titles(day(10), day(10), b2) == ["On two"])
+    check("events: an unknown board reads as the first", titles(day(10), day(10), 9999) == titles(day(10), day(10)))
+    _, r = c.api("event_add", {"title": "Theirs too", "from": day(10), "board": b2, "p": p2})
+    check("events: an event takes a project of its own board", r["event"]["p"] == p2, str(r))
+
+    # state: only the events covering the day asked for
+    _, r = c.api("event_add", {"title": "Spans today", "from": day(-1), "to": day(1)})
+    spans = r["event"]["id"]
+    _, st = c.api("state", day=today)
+    check("events: state lists an event that started yesterday and ends tomorrow", [e["title"] for e in st["events"]] == ["Spans today"], str(st["events"]))
+    _, st = c.api("state", day=day(12))
+    check("events: state for another day lists that day's events", {e["title"] for e in st["events"]} == {"Late", "é" * 300, "Sixty days"},
+          str([e["title"] for e in st["events"]]))
+    _, st = c.api("state", day=day(10), board=b2)
+    check("events: state shows only the board's own events", [e["title"] for e in st["events"]] == ["On two", "Theirs too"], str(st["events"]))
+
+    # the month: events, planned tasks and Google in one answer
+    _, r = c.api("task_add", {"title": "Planned in range", "p": pid})
+    planned = r["task"]["id"]
+    c.api("task_update", {"id": planned, "patch": {"where": "top", "slot": 1, "day": day(10), "start": 600}})
+    _, r = c.api("task_add", {"title": "In the dump"})
+    dumped = r["task"]["id"]
+    status, m = c.api("month", **{"from": day(8), "to": day(14)})
+    check("month: one answer holds events, tasks and google", status == 200 and set(m) == {"events", "tasks", "google"}, str(m)[:200])
+    check("month: the events of the range", {e["title"] for e in m["events"]} >= {w_title, "Late", "Sixty days"}
+          and "On two" not in {e["title"] for e in m["events"]}, str([e["title"] for e in m["events"]]))
+    mt = [t for t in m["tasks"] if t["id"] == planned]
+    check("month: the planned task, with only the fields the calendar needs", len(mt) == 1 and mt[0] == {
+          "id": planned, "title": "Planned in range", "day": day(10), "where": "top", "slot": 1, "start": 600,
+          "dur": 30, "done": False, "p": pid}, str(mt))
+    check("month: tasks in the brain dump are left out", all(t["id"] != dumped for t in m["tasks"]))
+    check("month: Google is reported as not connected", m["google"] == {"connected": False}, str(m["google"]))
+    status, m = c.api("month", **{"from": day(8), "to": day(14)}, board=b2)
+    check("month: another board shows its own events and no tasks of the first", [e["title"] for e in m["events"]] == ["On two", "Theirs too"]
+          and m["tasks"] == [], str(m)[:200])
+    status, m = c.api("month", **{"from": day(0), "to": day(62)})
+    check("month: more than 62 days is refused", status == 400, str(m))
+    c.api("task_delete", {"id": planned})
+    c.api("task_delete", {"id": dumped})
+
+    # deleting a project or a board keeps the events
+    _, r = c.api("project_add", {"name": "Short", "color": "#654321", "board": first})
+    p_short = r["project"]["id"]
+    _, r = c.api("event_add", {"title": "Keeps going", "from": day(2), "p": p_short})
+    keeps = r["event"]["id"]
+    c.api("project_delete", {"id": p_short})
+    _, r = c.api("events", **{"from": day(2), "to": day(2)})
+    k = next((e for e in r["events"] if e["id"] == keeps), {})
+    check("events: deleting a project keeps its events, without a project", k.get("title") == "Keeps going" and k.get("p") is None, str(k))
+    status, r = c.api("board_delete", {"id": b2})
+    check("events: the second board is deleted", status == 200 and r["to"] == first, str(r))
+    _, r = c.api("events", **{"from": day(10), "to": day(10)})
+    moved = {e["title"]: e for e in r["events"]}
+    check("events: a deleted board's events move to the board that takes its tasks",
+          "On two" in moved and moved["On two"]["board"] == first and moved["Theirs too"]["p"] == p2, str(list(moved)))
+
+    # deleting
+    status, r = c.api("event_delete", {"id": spans}, csrf=False)
+    check("events: deleting without the CSRF token is refused", status == 403)
+    status, r = c.api("event_delete", {"id": spans})
+    check("events: an event is deleted", status == 200 and r == {"ok": True}, str(r))
+    _, st = c.api("state", day=today)
+    check("events: it is gone from the day", st["events"] == [], str(st["events"]))
+    status, r = c.api("event_update", {"id": spans, "patch": {"title": "Back?"}})
+    check("events: a deleted event gives 404", status == 404, str(r))
+    for e in [w, one, late, long, sixty, moved["On two"], moved["Theirs too"]]:
+        c.api("event_delete", {"id": e["id"]})
+    for i in stray + [keeps]:
+        c.api("event_delete", {"id": i})
+    c.api("project_delete", {"id": p2})
+    _, r = c.api("events", **{"from": day(-1), "to": day(60)})
+    check("events: the test events are cleaned up", r["events"] == [], str(r["events"])[:200])
+    _, st = c.api("state", day=today)
+    check("events: one board is left, with its projects as before", len(st["boards"]) == 1 and pid in [p["id"] for p in st["projects"]])
+
+
+def run_month_google(c, today):
+    """Google events on the Calendar page: one bridge call per range, cached, and never fatal."""
+    d = date.today()
+
+    def day(n):
+        return (d + timedelta(days=n)).isoformat()
+    before = Bridge.range_calls
+    status, m = c.api("month", **{"from": day(-3), "to": day(3)})
+    g = m.get("google", {})
+    check("month: Google events come through for the range", status == 200 and g.get("connected") is True
+          and g["days"][today]["events"][0] == {"title": "Team <b>call</b>", "start": 600, "end": 660, "calendar": "Main"}
+          and g["days"][today]["allDay"][0]["title"] == "Holiday" and g["days"][day(-3)]["allDay"][0]["title"] == "Range start", str(g))
+    check("month: days outside the range are dropped", "1999-01-01" not in g.get("days", {}), str(g.get("days", {}).keys()))
+    check("month: the bridge was asked once", Bridge.range_calls == before + 1, str(Bridge.range_calls - before))
+    status, m = c.api("month", **{"from": day(-3), "to": day(3)})
+    check("month: the second read of the same range comes from the cache", status == 200 and Bridge.range_calls == before + 1
+          and m["google"]["days"][today]["events"][0]["start"] == 600, str(Bridge.range_calls - before))
+    status, m = c.api("month", **{"from": day(-3), "to": day(3)}, refresh="1")
+    check("month: refresh asks the bridge again", status == 200 and Bridge.range_calls == before + 2)
+
+    Bridge.knows_range = False
+    _, r = c.api("event_add", {"title": "Still here", "from": day(20)})
+    still = r["event"]["id"]
+    status, m = c.api("month", **{"from": day(20), "to": day(26)})
+    check("month: an older script that does not know ranges asks for an update", status == 200
+          and m["google"] == {"connected": True, "needsUpdate": True, "days": {}}, str(m.get("google")))
+    check("month: ...and the board's own events still come", [e["title"] for e in m.get("events", [])] == ["Still here"], str(m)[:200])
+    Bridge.knows_range = True
+    Bridge.range_error = "Calendar is busy"
+    status, m = c.api("month", **{"from": day(27), "to": day(30)})
+    check("month: a Google error is reported in the answer, not as a failure", status == 200
+          and "Calendar is busy" in m["google"].get("error", "") and m["google"]["days"] == {}, str(m.get("google")))
+    Bridge.range_error = None
+    c.api("event_delete", {"id": still})
+
+    status, _ = c.api("calendar_connect", {"url": f"http://127.0.0.1:{BRIDGE_PORT}/exec"})
+    before = Bridge.range_calls
+    c.api("month", **{"from": day(-3), "to": day(3)})
+    check("month: connecting again clears the cached ranges", status == 200 and Bridge.range_calls == before + 1)
+    status, _ = c.api("calendar_disconnect", {})
+    _, m = c.api("month", **{"from": day(-3), "to": day(3)})
+    check("month: after disconnecting, Google is not connected", m["google"] == {"connected": False}, str(m.get("google")))
+    c.api("calendar_connect", {"url": f"http://127.0.0.1:{BRIDGE_PORT}/exec"})
+
+
 def run_local(work):
     """Local mode, as start.php sets it up: no sign-in, this computer only, files blocked by the router."""
     today = date.today().isoformat()
@@ -633,7 +925,17 @@ def run_migration(work):
         con = sqlite3.connect(dbfile)
         version = con.execute("PRAGMA user_version").fetchone()[0]
         con.close()
-        check("migration: the database is now version 4", version == 4, str(version))
+        check("migration: the database is now version 5", version == 5, str(version))
+        con = sqlite3.connect(dbfile)
+        tables = {r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+        con.close()
+        check("migration: the events table and the range cache exist", {"events", "cal_range_cache"} <= tables, str(tables))
+        status, r = c.api("event_add", {"title": "After the upgrade", "from": today, "board": st["board"]})
+        check("migration: an event can be added to the upgraded database", status == 200
+              and r["event"]["title"] == "After the upgrade", str(r))
+        _, st2 = c.api("state", day=today)
+        check("migration: state lists it and the old task is untouched", [e["title"] for e in st2.get("events", [])] == ["After the upgrade"]
+              and any(x["title"] == "Old task" and x["dur"] == 45 for x in st2["tasks"]), str(st2.get("events")))
         status, st = c.api("state", day=today)
         check("migration: exactly one board, named Main", status == 200 and len(st["boards"]) == 1
               and st["boards"][0]["name"] == "Main" and st["board"] == st["boards"][0]["id"], str(st.get("boards")))

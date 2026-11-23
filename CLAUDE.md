@@ -59,8 +59,20 @@ machine paths. Private notes for the owner's own deployment live in `CLAUDE.loca
   "Send to calendar" sends the day's blocks of every board. Board names are the owner's data: none belong in
   this repo. Unfinished tasks from past days go back to the dump (`rollover`,
   called by the browser with its local date).
+- **Events and the Calendar page:** an event (`events` table, schema version 5) belongs to one board and runs
+  from `day_from` to `day_to` (at most 60 days), all-day unless `start`/`end` are set (one-day events only).
+  It carries `location`, a project, `notes` and `subs` (the "To arrange" checklist, same shape as a task's).
+  `event_apply()` in `api.php` checks the row as a whole after every change. `state` returns the day's events
+  (chips in `#allday`, never on the timeline); `events` and `month` read a range of at most 62 days. `month` holds
+  everything the Calendar page draws in one answer: events, the board's planned tasks and `google`, from
+  `calendar_range()` in `calendar.php` (one bridge `range` call, cached 10 minutes in `cal_range_cache`). A
+  bridge pasted before `range` existed answers "unknown action", which becomes `needsUpdate`: the page and
+  Settings then show how to update the script. Google trouble never fails `month`. The Day | Calendar switch
+  (`#pages`, `goPage()`) and Month | Week (`setView()`) are kept in `localStorage`; `render()` draws only the
+  page in view (`renderCalendar()` for the Calendar page). Events are dragged to another day with the mouse
+  (`evDrag`); nothing re-draws the calendar during that drag.
 - **Calendar:** the server never holds Google credentials. An Apps Script web app in the user's Google account
-  ("the bridge") answers `events` and `push` for requests carrying the shared key from `data/config.php`. It
+  ("the bridge") answers `events`, `range` and `push` for requests carrying the shared key from `data/config.php`. It
   reads every calendar ticked in Google Calendar except "Planner", and writes only its own tagged events into
   "Planner". Day results are cached 10 minutes in SQLite. On Windows, PHP has no CA bundle by default, so
   `bridge_call` asks curl to use the Windows certificate store.

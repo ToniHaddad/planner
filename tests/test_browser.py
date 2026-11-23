@@ -12,6 +12,7 @@ import tempfile
 import threading
 import time
 import urllib.request
+from datetime import date, timedelta
 from pathlib import Path
 
 from playwright.sync_api import sync_playwright
@@ -63,6 +64,7 @@ def main():
             page.on("pageerror", lambda e: problems.append(str(e)))
             run(page)
             run_touch(browser, problems)
+            run_phone_calendar(browser, problems)
             # the one deliberate wrong-password try in run() makes the browser log one 400; anything else is a problem
             expected = "Failed to load resource: the server responded with a status of 400 (Bad Request)"
             if expected in problems:
@@ -288,6 +290,7 @@ def run(page):
     run_sub_rename(page)
     run_sub_reorder(page)
     run_boards(page)
+    run_events(page)
 
 
 def run_sub_rename(page):
@@ -465,6 +468,304 @@ def run_boards(page):
     page.wait_for_timeout(300)
     check("boards: the board is back to how it started", page.locator("#z-dump .item").count() == dump_before
           and page.locator("#tl .blk[data-blk]").count() == 2)
+
+
+def wait_until(page, fn, tries=50):
+    """Polls from here (the page's CSP forbids eval-style waits)."""
+    for _ in range(tries):
+        if fn():
+            return True
+        page.wait_for_timeout(100)
+    return False
+
+
+def new_event(page, opener, title, start=None, end=None, location="", subs=(), day_from=None, day_to=None):
+    """Fills the event dialog opened by `opener` and saves it."""
+    page.click(opener)
+    page.wait_for_selector("#event-dlg[open]")
+    page.fill("#ev-title", title)
+    if day_from:
+        page.fill("#ev-from", day_from)
+        page.dispatch_event("#ev-from", "change")
+    if day_to:
+        page.fill("#ev-to", day_to)
+    if start:
+        page.uncheck("#ev-allday")
+        page.fill("#ev-start", start)
+        page.fill("#ev-end", end)
+    page.fill("#ev-loc", location)
+    for s in subs:
+        page.fill("#ev-subadd", s)
+        page.press("#ev-subadd", "Enter")
+    page.click("#ev-save")
+    page.wait_for_selector("#event-dlg", state="hidden")
+
+
+def run_events(page):
+    """Events on the Day page and the Calendar page. Leaves the Day page showing, in month view."""
+    today = date.today()
+    iso = lambda d: d.isoformat()
+    page.reload()
+    page.wait_for_selector("#top3 .slot")
+    blocks = page.locator("#tl .blk[data-blk]").count()
+
+    # --- the Day page: the row above the timeline ---
+    check("events: the + Event button shows even on a day without events",
+          page.locator("#allday [data-act=event-new]").is_visible() and page.locator("#allday .chip.own").count() == 0)
+    page.click("#allday [data-act=event-new]")
+    page.wait_for_selector("#event-dlg[open]")
+    check("events: the dialog opens for a new all-day event on this day",
+          page.locator("#ev-head").inner_text() == "New event" and page.input_value("#ev-from") == iso(today)
+          and page.input_value("#ev-to") == iso(today) and page.is_checked("#ev-allday")
+          and not page.locator("#ev-del").is_visible() and not page.locator("#ev-times").is_visible())
+    check("events: the dialog's boxes do not look like login fields", page.locator("#event-dlg input[autocomplete=off]").count() >= 6
+          and page.locator("#event-dlg input[type=password], #event-dlg [autocomplete=username]").count() == 0)
+    page.click("#ev-save")
+    check("events: saving without a title says why and keeps the dialog open",
+          page.locator("#ev-error").inner_text() == "An event needs a title" and page.locator("#event-dlg[open]").count() == 1)
+    page.fill("#ev-title", "Thrown away")
+    page.keyboard.press("Escape")
+    page.wait_for_selector("#event-dlg", state="hidden")
+    page.wait_for_timeout(300)
+    check("events: Escape closes the dialog without saving", page.locator("#allday .chip.own").count() == 0)
+
+    new_event(page, "#allday [data-act=event-new]", "Site visit <b>x</b>", location="<i>Depot</i>",
+              subs=["Hire <b>van</b>", "Keys"])
+    chip = "#allday .chip.own:has-text('Site visit')"
+    page.wait_for_selector(chip)
+    check("events: an all-day event added from the Day page shows as a chip",
+          "Site visit <b>x</b> · <i>Depot</i>" in page.locator(chip).inner_text() and "0/2" in page.locator(chip).inner_text(),
+          page.locator(chip).inner_text())
+    check("events: markup in its title and place is shown as text", page.locator("#allday i").count() == 0
+          and page.locator(chip + " b").count() == 1)
+    check("events: an own event never blocks the timeline", page.locator("#tl .blk[data-blk]").count() == blocks)
+
+    # edit: tick, rename, save
+    page.click(chip)
+    page.wait_for_selector("#event-dlg[open]")
+    check("events: clicking the chip opens it for editing", page.locator("#ev-head").inner_text() == "Edit event"
+          and page.input_value("#ev-title") == "Site visit <b>x</b>" and page.locator("#ev-subs li").count() == 2
+          and page.locator("#ev-del").is_visible())
+    check("events: markup in the checklist is text in the dialog", page.locator("#ev-subs b").count() == 0
+          and "Hire <b>van</b>" in page.locator("#ev-subs li").nth(0).inner_text())
+    page.click("#ev-subs li >> nth=0 >> [data-act=evsub-done]")
+    page.dblclick("#ev-subs li >> nth=1 >> span")
+    page.fill("#ev-subs input.edit", "Keys and badges")
+    page.press("#ev-subs input.edit", "Enter")
+    check("events: a thing to arrange is renamed by double-clicking it, and the dialog stays open",
+          "Keys and badges" in page.locator("#ev-subs li").nth(1).inner_text() and page.locator("#event-dlg[open]").count() == 1)
+    page.click("#ev-save")
+    page.wait_for_selector("#event-dlg", state="hidden")
+    page.wait_for_selector(chip + ":has-text('1/2')")
+    check("events: the edit is saved: the chip counts 1/2", "1/2" in page.locator(chip).inner_text())
+
+    # a timed event
+    page.click("#allday [data-act=event-new]")
+    page.wait_for_selector("#event-dlg[open]")
+    page.uncheck("#ev-allday")
+    check("events: unticking All day shows the times and ties the end date to the start",
+          page.locator("#ev-times").is_visible() and page.locator("#ev-to").is_disabled())
+    page.fill("#ev-title", "Supplier call")
+    page.fill("#ev-start", "15:00")
+    page.fill("#ev-end", "14:00")
+    page.click("#ev-save")
+    check("events: an end before the start is refused in the dialog",
+          page.locator("#ev-error").inner_text() == "The end time must be after the start time")
+    page.fill("#ev-start", "14:00")
+    page.fill("#ev-end", "15:00")
+    page.click("#ev-save")
+    page.wait_for_selector("#event-dlg", state="hidden")
+    timed = "#allday .chip.own:has-text('Supplier call')"
+    page.wait_for_selector(timed)
+    check("events: a timed event shows its time first", page.locator(timed).inner_text().startswith("14:00–15:00 Supplier call"),
+          page.locator(timed).inner_text())
+    check("events: ...and adds no block to the timeline", page.locator("#tl .blk[data-blk]").count() == blocks)
+
+    # delete, undo, delete
+    page.click(timed)
+    page.wait_for_selector("#event-dlg[open]")
+    page.click("#ev-del")
+    page.wait_for_selector("#toast.on:has-text('Event deleted')")
+    check("events: a deleted event leaves the row at once", page.locator(timed).count() == 0)
+    page.click("#toast-act")
+    page.wait_for_selector(timed)
+    check("events: Undo brings it back, time and all", page.locator(timed).inner_text().startswith("14:00–15:00"))
+    page.click(timed)
+    page.wait_for_selector("#event-dlg[open]")
+    page.click("#ev-del")
+    page.wait_for_selector("#toast.on:has-text('Event deleted')")
+    page.reload()
+    page.wait_for_selector(chip)
+    check("events: without Undo it stays deleted", page.locator(timed).count() == 0 and page.locator(chip).count() == 1)
+
+    # --- the Calendar page ---
+    page.click("[data-act=page][data-page=calendar]")
+    page.wait_for_selector("#cal-grid .cell")
+    check("calendar: the switch shows the Calendar page and hides the Day page",
+          page.locator("#cal").is_visible() and not page.locator(".cols").is_visible()
+          and "on" in page.get_attribute("[data-page=calendar]", "class").split())
+    check("calendar: the heading names the month; free time and Send to calendar are hidden",
+          page.locator("#dayname").inner_text() == today.strftime("%B %Y") and not page.locator("#free").is_visible()
+          and not page.locator("#push").is_visible(), page.locator("#dayname").inner_text())
+    page.reload()
+    page.wait_for_selector("#cal-grid .cell")
+    check("calendar: the page choice is kept after a reload", page.locator("#cal").is_visible() and not page.locator(".cols").is_visible())
+    cells = page.locator("#cal-grid .cell").count()
+    check("calendar: the month grid has whole weeks (5 or 6)", cells in (35, 42), str(cells))
+    page.wait_for_selector(f".cell[data-cday='{iso(today)}'] .gev")
+    check("calendar: today is marked and holds the Google events, as text",
+          page.locator(f".cell.today[data-cday='{iso(today)}']").count() == 1
+          and "Holiday" in page.locator(f".cell[data-cday='{iso(today)}']").inner_text()
+          and page.locator("#cal-grid .gev b:has-text('Team')").count() == 0)
+    check("calendar: today's own event shows, its markup as text",
+          page.locator(f".cell[data-cday='{iso(today)}'] .ev:has-text('Site visit <b>x</b>')").count() == 1
+          and page.locator("#cal-grid .ev b:has-text('x')").count() == 0)
+
+    # a multi-day event from the + Event button
+    first = date(today.year, today.month, 10)
+    d = lambda n: iso(first + timedelta(days=n))
+    new_event(page, ".cal-bar [data-act=event-new]", "Workshop", location="Hall 2", day_from=d(0), day_to=d(2),
+              subs=["Room", "Lunch"])
+    page.wait_for_selector(f".cell[data-cday='{d(0)}'] .ev:has-text('Workshop')")
+    on = lambda day: page.locator(f".cell[data-cday='{day}'] .ev:has-text('Workshop')").count() == 1
+    check("calendar: a three-day event shows on each of its days and no other",
+          on(d(0)) and on(d(1)) and on(d(2)) and not on(d(-1)) and not on(d(3)))
+    check("calendar: it reads as one bar: flat ends where it goes on",
+          "cont-r" in page.get_attribute(f".cell[data-cday='{d(0)}'] .ev", "class")
+          and "cont-l" in page.get_attribute(f".cell[data-cday='{d(2)}'] .ev", "class"))
+
+    # drag it to another day: the day grabbed lands where it is let go
+    page.locator(f".cell[data-cday='{d(0)}'] .ev:has-text('Workshop')").drag_to(page.locator(f".cell[data-cday='{d(7)}']"))
+    page.wait_for_selector(f".cell[data-cday='{d(9)}'] .ev:has-text('Workshop')")
+    check("calendar: dragging an event to another day moves it and keeps its length",
+          on(d(7)) and on(d(8)) and on(d(9)) and not on(d(0)) and not on(d(10)) and page.locator("#event-dlg[open]").count() == 0)
+    page.wait_for_timeout(300)
+    page.reload()
+    page.wait_for_selector(f".cell[data-cday='{d(9)}'] .ev:has-text('Workshop')")
+    check("calendar: the move is saved", on(d(7)) and not on(d(0)))
+
+    # a click on a free part of a day opens a new event on that day
+    free = d(4) if d(4) != iso(today) else d(5)
+    page.locator(f".cell[data-cday='{free}']").click(position={"x": 60, "y": 80})
+    page.wait_for_selector("#event-dlg[open]")
+    check("calendar: clicking a free part of a day opens a new event on that day", page.input_value("#ev-from") == free
+          and page.locator("#ev-head").inner_text() == "New event")
+    page.click("#event-dlg [data-act=event-close] >> nth=1")
+    page.wait_for_selector("#event-dlg", state="hidden")
+
+    # the day number opens the Day page on that date
+    page.click(f".cell[data-cday='{d(8)}'] .dnum")
+    page.wait_for_selector(".cols:visible")
+    page.wait_for_selector("#allday .chip.own:has-text('Workshop')")
+    check("calendar: a day number opens the Day page on that date",
+          page.locator("#daydate").inner_text() == (first + timedelta(days=8)).strftime("%B ") + str((first + timedelta(days=8)).day)
+          and not page.locator("#cal").is_visible(), page.locator("#daydate").inner_text())
+    check("events: on the Day page a multi-day event says which day it is",
+          "day 2 of 3" in page.locator("#allday .chip.own:has-text('Workshop')").inner_text()
+          and "Hall 2" in page.locator("#allday .chip.own:has-text('Workshop')").inner_text())
+    page.click("[data-act=today]")
+    page.wait_for_selector(chip)
+
+    # the week view
+    page.click("[data-act=page][data-page=calendar]")
+    page.click("[data-act=cal-view][data-view=week]")
+    page.wait_for_selector("#cal-grid .wday")
+    wk = f".wday[data-cday='{iso(today)}']"
+    page.wait_for_selector(wk + " .wtask")
+    check("calendar: the week view shows seven days, Monday first", page.locator("#cal-grid .wday").count() == 7
+          and date.fromisoformat(page.get_attribute("#cal-grid .wday >> nth=0", "data-cday")).weekday() == 0)
+    check("calendar: the week lists the day's planned tasks, Today's 3 first with their number, done ones struck through",
+          "Write the report" in page.locator(wk + " .wtask").nth(0).inner_text()
+          and page.locator(wk + " .wtask").nth(0).locator("b").inner_text() == "1"
+          and "done" in page.get_attribute(wk + " .wtask >> nth=0", "class")
+          and "Call the supplier" in page.locator(wk + " .wtask").nth(1).inner_text())
+    site = page.locator(wk + " .ev:has-text('Site visit')")
+    check("calendar: the week shows an event's place and checklist", "<i>Depot</i>" in site.inner_text()
+          and "To arrange 1/2" in site.inner_text(), site.inner_text())
+    monday = today - timedelta(days=today.weekday())
+    head = page.locator("#dayname").inner_text()
+    check("calendar: the heading names the week", head != today.strftime("%B %Y") and str(monday.day) in head
+          and str((monday + timedelta(days=6)).day) in head, head)
+    page.reload()
+    page.wait_for_selector("#cal-grid .wday")
+    check("calendar: the week view is kept after a reload", page.locator("#cal-grid .wday").count() == 7)
+    page.click("[data-act=cal-view][data-view=month]")
+    page.wait_for_selector("#cal-grid .cell")
+
+    # Coming up: countdown, progress, and ticking things off
+    later = iso(today + timedelta(days=5))
+    new_event(page, ".cal-bar [data-act=event-new]", "Later thing", day_from=later, subs=["Tickets"])
+    row = "#up .up-row:has-text('Site visit')"
+    page.wait_for_selector("#up .up-row:has-text('Later thing')")
+    check("coming up: an event of today says today, with its place and progress",
+          page.locator(row + " .up-when").inner_text() == "today" and "<i>Depot</i>" in page.locator(row).inner_text()
+          and "1/2" in page.locator(row + " .up-prog").inner_text() and page.locator(row + " .ok").count() == 0)
+    check("coming up: a later one counts the days", page.locator("#up .up-row:has-text('Later thing') .up-when").inner_text() == "in 5 days")
+    check("coming up: what is still to arrange is listed, as text", page.locator(row + " .up-todo li").count() == 1
+          and "Keys and badges" in page.locator(row + " .up-todo").inner_text()
+          and page.locator("#up b, #up .up-title i, #up .up-loc i").count() == 0)
+    page.click(row + " [data-act=up-tick]")
+    page.wait_for_selector(row + " .ok")
+    check("coming up: ticking it off there moves the progress to 2/2 with a tick",
+          "2/2" in page.locator(row + " .up-prog").inner_text() and page.locator(row + " .up-todo").count() == 0)
+    page.wait_for_timeout(400)
+    page.reload()
+    page.wait_for_selector(row)
+    check("coming up: the tick survives a reload", "2/2" in page.locator(row + " .up-prog").inner_text()
+          and page.locator(row + " .ok").count() == 1)
+
+    # an older calendar script: a hint on the page and update steps in Settings
+    T.Bridge.knows_range = False
+    page.click("#calstat [data-act=refresh-cal]")
+    page.wait_for_selector("#cal-note:visible")
+    check("calendar: with an older script the page says how to update it", page.locator("#cal-note").inner_text()
+          == "To see Google Calendar events here, update the calendar script: Settings › Google Calendar.")
+    page.click("#cal-note [data-act=settings-update]")
+    wait_until(page, lambda: "doGet" in page.input_value("#bridge-code"))
+    check("calendar: Settings opens on the update steps, with the script ready to copy",
+          page.locator("#cal-update[open]").count() == 1 and page.locator("#cal-old").is_visible()
+          and page.locator("#cal-update [data-act=copy-code]").is_visible() and "k" * 64 in page.input_value("#bridge-code"))
+    page.click("[data-act=settings-close]")
+    T.Bridge.knows_range = True
+    page.click("#calstat [data-act=refresh-cal]")
+    page.wait_for_selector("#cal-note", state="hidden")
+    check("calendar: once updated the hint goes away", not page.locator("#cal-note").is_visible())
+
+    # back to the Day page for what follows
+    page.click("[data-act=page][data-page=day]")
+    page.wait_for_selector(".cols:visible")
+    page.wait_for_selector(chip)
+    check("events: back on the Day page the chip shows the ticked checklist", "2/2" in page.locator(chip).inner_text())
+
+
+def run_phone_calendar(browser, problems):
+    """The Calendar page on a phone: no sideways scrolling, dots in the month, days stacked in the week."""
+    ctx = browser.new_context(viewport={"width": 390, "height": 800}, has_touch=True, is_mobile=True)
+    page = ctx.new_page()
+    page.on("console", lambda m: problems.append(m.text) if m.type == "error" else None)
+    page.on("pageerror", lambda e: problems.append(str(e)))
+    page.goto(T.BASE + "/")
+    page.fill("input[name=username]", "alex")
+    page.fill("input[name=password]", "correct horse battery")
+    page.click("button[type=submit]")
+    page.wait_for_selector("#top3 .slot")
+    page.click("[data-act=page][data-page=calendar]")
+    page.wait_for_selector("#cal-grid .cell .ev")
+    page.wait_for_selector("#up .up-row")
+    width = page.evaluate("document.documentElement.scrollWidth")
+    check("phone: the Calendar page fits the width, no sideways scrolling", width <= 390, str(width))
+    ev = page.locator("#cal-grid .cell .ev").first.bounding_box()
+    check("phone: events in the month are small dots", ev["width"] < 12 and ev["height"] < 12, str(ev))
+    day = page.get_attribute("#cal-grid .cell .ev >> nth=0", "data-day")
+    page.locator(f".cell[data-cday='{day}']").click(position={"x": 25, "y": 45})
+    page.wait_for_selector(f".wday[data-cday='{day}'] .ev")      # the week's own data has arrived
+    page.wait_for_timeout(300)
+    a, b = (page.locator("#cal-grid .wday").nth(i).bounding_box() for i in (0, 1))
+    check("phone: tapping a day opens its week, the days one under the other",
+          page.locator(f".wday[data-cday='{day}']").count() == 1 and abs(a["x"] - b["x"]) < 2 and b["y"] > a["y"])
+    width = page.evaluate("document.documentElement.scrollWidth")
+    check("phone: the week fits the width too", width <= 390, str(width))
+    ctx.close()
 
 
 class Finger:
