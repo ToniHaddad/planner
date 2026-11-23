@@ -2,7 +2,7 @@
 'use strict';
 
 const H = 52, SNAP = 15, DURS = [15, 30, 45, 60, 90, 120, 180];
-const PALETTE = ['#ff5fa8', '#4ade80', '#ff9f43', '#4da3ff', '#c77dff', '#ffd23f'];
+const PALETTE = ['#3ca9e1', '#5dbe53', '#fc981e', '#b1a4d9', '#ee483c', '#f6bf1a'];
 const csrf = document.querySelector('meta[name=csrf]').content;
 const $ = id => document.getElementById(id);
 
@@ -12,6 +12,7 @@ let DAY = dayStr(new Date());
 let BOARD = 0;         // the board being shown; 0 until the server says which exist (the choice is kept per device)
 try { BOARD = +localStorage.getItem('planner_board') || 0; } catch (e) { /* private window */ }
 let drag = null;       // { id, off } while a task is being dragged
+let subDrag = null;    // { id, i } while a subtask is being dragged to a new place in its list
 let editing = false;   // true while a title is being renamed (pauses re-rendering)
 const open = new Set(); // ids of the tasks whose subtasks and notes are showing
 
@@ -29,9 +30,9 @@ const startMin = () => S.settings.dayStart * 60;
 const endMin = () => S.settings.dayEnd * 60;
 function ink(hex) {
   const m = /^#(..)(..)(..)$/.exec(hex);
-  if (!m) return '#17142e';
+  if (!m) return '#1b1c1e';
   const l = (.299 * parseInt(m[1], 16) + .587 * parseInt(m[2], 16) + .114 * parseInt(m[3], 16)) / 255;
-  return l > .55 ? '#17142e' : '#fff';
+  return l > .55 ? '#1b1c1e' : '#fff';
 }
 /** Shows a short message; `action` ({ label, run }) adds a button to it, such as Undo. */
 function toast(msg, action) {
@@ -265,9 +266,9 @@ function moreBtn(t) {
 function details(t) {
   if (!open.has(t.id)) return '';
   return `<div class="details" data-details="${t.id}">
-    <ul class="subs">${t.subs.map((s, i) => `<li class="${s.done ? 'done' : ''}">
+    <ul class="subs">${t.subs.map((s, i) => `<li class="${s.done ? 'done' : ''}" draggable="true" data-subrow="${t.id}" data-i="${i}">
       <button class="check ${s.done ? 'on' : ''}" data-act="sub-done" data-id="${t.id}" data-i="${i}" title="Done">✓</button>
-      <span data-sub="${t.id}" data-i="${i}" title="Double-click to rename">${esc(s.title)}</span>
+      <span data-sub="${t.id}" data-i="${i}" title="Drag to reorder, double-click to rename">${esc(s.title)}</span>
       <button class="x" title="Delete subtask" data-act="sub-del" data-id="${t.id}" data-i="${i}">×</button></li>`).join('')}</ul>
     <input class="subadd" type="text" name="subtask" data-subadd="${t.id}" placeholder="Add a subtask and press Enter…" aria-label="New subtask" autocomplete="off" maxlength="300">
     <textarea class="notes" name="notes" data-notes="${t.id}" placeholder="Notes…" aria-label="Notes" rows="2" maxlength="5000">${esc(t.notes)}</textarea>
@@ -620,7 +621,45 @@ document.addEventListener('dragstart', e => {
   e.dataTransfer.setData('text/plain', String(drag.id));
   setTimeout(() => el.classList.add('dragging'), 0);
 });
-document.addEventListener('dragend', () => { drag = null; render(); });
+document.addEventListener('dragend', () => { drag = null; subDrag = null; render(); });
+
+// ---------- subtasks: drag to a new place in the list ----------
+document.addEventListener('dragstart', e => {
+  if (touch) return;
+  const li = e.target.closest && e.target.closest('[data-subrow]');
+  if (!li) return;
+  subDrag = { id: +li.dataset.subrow, i: +li.dataset.i };
+  e.dataTransfer.effectAllowed = 'move';
+  e.dataTransfer.setData('text/plain', 'subtask');
+  setTimeout(() => li.classList.add('dragging'), 0);
+});
+
+/** The row of the same task under the pointer, and whether the drop would go after it. */
+function subTarget(target, y) {
+  const li = target && target.closest && target.closest('[data-subrow]');
+  if (!li || +li.dataset.subrow !== subDrag.id) return null;
+  const r = li.getBoundingClientRect();
+  return { li: li, after: y > r.top + r.height / 2 };
+}
+
+/** Shows where the dragged subtask would land. Returns true when it can be dropped there. */
+function subMove(target, y) {
+  document.querySelectorAll('.drop-before, .drop-after').forEach(x => x.classList.remove('drop-before', 'drop-after'));
+  const at = subTarget(target, y);
+  if (at) at.li.classList.add(at.after ? 'drop-after' : 'drop-before');
+  return !!at;
+}
+
+function subDrop(target, y) {
+  const t = task(subDrag.id), at = subTarget(target, y);
+  if (!t || !at || !t.subs[subDrag.i]) return;
+  let to = +at.li.dataset.i + (at.after ? 1 : 0);
+  if (to > subDrag.i) to--;                      // taking the row out shifts the ones below it up
+  if (to === subDrag.i) return;
+  const subs = t.subs.slice(), moved = subs.splice(subDrag.i, 1)[0];
+  subs.splice(to, 0, moved);
+  update(t, { subs: subs });
+}
 
 function dropTime(y) {
   const t = task(drag.id), r = $('tl').getBoundingClientRect();
@@ -688,11 +727,13 @@ function dragDrop(target, y) {
 }
 
 document.addEventListener('dragover', e => {
+  if (subDrag) { if (subMove(e.target, e.clientY)) e.preventDefault(); return; }
   if (!drag || !task(drag.id)) return;
   if (dragMove(e.target, e.clientY)) e.preventDefault();
 });
 
 document.addEventListener('drop', e => {
+  if (subDrag) { e.preventDefault(); subDrop(e.target, e.clientY); return; }
   if (!drag || !task(drag.id)) return;
   e.preventDefault();
   dragDrop(e.target, e.clientY);
@@ -712,15 +753,18 @@ function touchEnd(drop) {
   if (!was.active) return;
   was.clone.remove();
   document.body.classList.remove('touch-dragging');
-  if (drop && task(drag.id)) dragDrop(document.elementFromPoint(was.x, was.y), was.y);
-  drag = null;
+  const under = document.elementFromPoint(was.x, was.y);
+  if (drop && subDrag) subDrop(under, was.y);
+  else if (drop && task(drag.id)) dragDrop(under, was.y);
+  drag = null; subDrag = null;
   render();
 }
 
 function touchLift() {
   const el = touch.el, r = el.getBoundingClientRect();
   touch.active = true;
-  drag = { id: +el.dataset.id, off: el.dataset.blk ? Math.round((touch.y - r.top) / H * 60) : 0 };
+  if (el.dataset.subrow) subDrag = { id: +el.dataset.subrow, i: +el.dataset.i };
+  else drag = { id: +el.dataset.id, off: el.dataset.blk ? Math.round((touch.y - r.top) / H * 60) : 0 };
   const c = el.cloneNode(true);
   c.classList.add('drag-clone');
   c.removeAttribute('data-id');
@@ -738,14 +782,14 @@ function touchLift() {
     const step = touch.y < EDGE ? -14 : touch.y > innerHeight - EDGE ? 14 : 0;
     if (!step) return;
     scrollBy(0, step);
-    dragMove(document.elementFromPoint(touch.x, touch.y), touch.y);
+    (subDrag ? subMove : dragMove)(document.elementFromPoint(touch.x, touch.y), touch.y);
   }, 16);
 }
 
 document.addEventListener('touchstart', e => {
   if (touch) { touchEnd(false); return; }          // a second finger cancels
-  if (e.touches.length !== 1 || editing || drag) return;
-  const el = e.target.closest('[data-id][draggable="true"]');
+  if (e.touches.length !== 1 || editing || drag || subDrag) return;
+  const el = e.target.closest('[data-id][draggable="true"], [data-subrow]');
   if (!el || e.target.closest('button, input, [data-rs]')) return;   // buttons keep their tap
   const p = e.touches[0];
   touch = { el: el, x: p.clientX, y: p.clientY, active: false, timer: setTimeout(touchLift, HOLD_MS) };
@@ -763,6 +807,7 @@ document.addEventListener('touchmove', e => {
   touch.clone.style.left = (p.clientX - touch.dx) + 'px';
   touch.clone.style.top = (p.clientY - touch.dy) + 'px';
   const under = document.elementFromPoint(p.clientX, p.clientY);
+  if (subDrag) { subMove(under, p.clientY); return; }
   touch.clone.classList.toggle('faint', !!(under && under.closest('#tl')));   // keep the landing time readable
   dragMove(under, p.clientY);
 }, { passive: false });
@@ -853,9 +898,9 @@ $('settings').addEventListener('click', e => { if (e.target === e.currentTarget)
 
 // ---------- start ----------
 startDay();
-setInterval(() => { if (!drag && !editing) renderTimeline(); }, 60000);          // keeps the "now" line moving
+setInterval(() => { if (!drag && !subDrag && !editing) renderTimeline(); }, 60000);          // keeps the "now" line moving
 document.addEventListener('visibilitychange', () => {                              // new day or stale tab: reload
   const a = document.activeElement;
-  if (document.hidden || drag || editing || (a && a.matches('.subadd, .notes'))) return;
+  if (document.hidden || drag || subDrag || editing || (a && a.matches('.subadd, .notes'))) return;
   startDay();
 });

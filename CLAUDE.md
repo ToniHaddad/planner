@@ -70,6 +70,7 @@ machine paths. Private notes for the owner's own deployment live in `CLAUDE.loca
 - **Dragging:** a mouse uses HTML5 drag and drop; a finger uses the touch handlers in `app.js` (press and hold
   260 ms, then move; the page scrolls when the finger is near an edge). Both call `dragMove()` and `dragDrop()`.
   Nothing may re-render the board while a touch drag is active: a touch only reports to the element it started on.
+  Subtasks are dragged into a new order the same two ways, through `subDrag`, `subMove()` and `subDrop()`.
 - **Front end:** a delete is sent at once; "Undo" adds the task again (`restoreTask`), without its slot or time
   if those were taken meanwhile. A re-draw replaces the subtask and notes boxes, so `renderLists()` carries
   over what is being typed; notes are saved 700 ms after the last keystroke. `save()` ignores the answer to an

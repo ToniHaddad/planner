@@ -286,6 +286,7 @@ def run(page):
     page.click("[data-act=settings-close]")
 
     run_sub_rename(page)
+    run_sub_reorder(page)
     run_boards(page)
 
 
@@ -321,6 +322,41 @@ def run_sub_rename(page):
     page.click(item + " [data-act=more]")
     check("subtasks: the new name is saved", "renamed" in page.locator(item + " .subs li").nth(1).inner_text()
           and "First step" in page.locator(item + " .subs li").nth(0).inner_text())
+    page.click(item + " .item [data-act=del]")
+    page.wait_for_timeout(300)
+
+
+def run_sub_reorder(page):
+    """Subtasks are dragged into a new order. Uses its own task and deletes it afterwards."""
+    add(page, "Order host")
+    item = "#z-dump .task:has(.item:has-text('Order host'))"
+    page.click(item + " [data-act=more]")
+    for title in ("Alpha", "Bravo", "Charlie"):
+        page.fill(item + " .subadd", title)
+        page.press(item + " .subadd", "Enter")
+    rows = page.locator(item + " .subs li")
+    rows.nth(2).wait_for()
+    page.click(item + " .subs li >> nth=0 >> [data-act=sub-done]")
+
+    def order():
+        return [t.strip().lstrip("✓").rstrip("×").strip() for t in rows.all_inner_texts()]
+
+    box = rows.nth(2).bounding_box()
+    rows.nth(0).drag_to(rows.nth(2), target_position={"x": box["width"] / 2, "y": box["height"] - 2})
+    page.wait_for_timeout(300)
+    check("subtasks: dragging the first below the last moves it to the end, tick and all",
+          order() == ["Bravo", "Charlie", "Alpha"] and "done" in (rows.nth(2).get_attribute("class") or ""), str(order()))
+    rows.nth(2).drag_to(rows.nth(1), target_position={"x": box["width"] / 2, "y": 2})
+    page.wait_for_timeout(300)
+    check("subtasks: dragging onto the top half of a row puts it before that row", order() == ["Bravo", "Alpha", "Charlie"], str(order()))
+    page.wait_for_timeout(300)
+    page.reload()
+    page.wait_for_selector(item)
+    page.click(item + " [data-act=more]")
+    rows = page.locator(item + " .subs li")
+    check("subtasks: the new order is saved", order() == ["Bravo", "Alpha", "Charlie"], str(order()))
+    check("subtasks: a subtask dragged onto the task lists changes nothing",
+          page.locator("#z-dump .item:has-text('Order host')").count() == 1)
     page.click(item + " .item [data-act=del]")
     page.wait_for_timeout(300)
 

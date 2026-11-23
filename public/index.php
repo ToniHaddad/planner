@@ -73,7 +73,7 @@ $theme = ($_COOKIE['planner_theme'] ?? '') === 'light' ? 'light' : 'dark';   // 
     <div class="cols">
       <div class="col c1">
         <h2 class="h"><span class="num">1</span>Brain dump</h2>
-        <p class="hint">Empty your head. Sort later. The ⋯ on a task opens its subtasks and notes. Double-click a title to rename it.</p>
+        <p class="hint">Empty your head. Sort later. The ⋯ on a task opens its subtasks and notes. Double-click a title to rename it; drag a subtask to reorder.</p>
         <p class="hint touch-only">To move a task, press and hold it, then drag.</p>
         <div class="add"><input id="new" name="task" type="text" placeholder="Type and press Enter…" aria-label="New task" autocomplete="off" data-lpignore="true" data-1p-ignore data-bwignore maxlength="300" autofocus><select id="newp" title="Project"></select></div>
         <div class="zone" id="z-dump" data-zone="dump" data-empty="Head empty. Nice."></div>
