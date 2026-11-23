@@ -75,7 +75,8 @@ $theme = ($_COOKIE['planner_theme'] ?? '') === 'light' ? 'light' : 'dark';   // 
         <h2 class="h"><span class="num">1</span>Brain dump</h2>
         <p class="hint">Empty your head. Sort later. The ⋯ on a task opens its subtasks and notes. Double-click a title to rename it; drag a subtask to reorder.</p>
         <p class="hint touch-only">To move a task, press and hold it, then drag.</p>
-        <div class="add"><input id="new" name="task" type="text" placeholder="Type and press Enter…" aria-label="New task" autocomplete="off" data-lpignore="true" data-1p-ignore data-bwignore maxlength="300" autofocus><select id="newp" title="Project"></select></div>
+        <?php /* A form with a button: some phone keyboards have no Enter key for a lone text box. */ ?>
+        <form class="add" id="add-form" method="post" action="./"><input id="new" name="task" type="text" placeholder="Type a task…" aria-label="New task" autocomplete="off" enterkeyhint="done" data-lpignore="true" data-1p-ignore data-bwignore maxlength="300" autofocus><select id="newp" name="project" title="Project"></select><button class="btn go" type="submit" title="Add the task">Add</button></form>
         <div class="zone" id="z-dump" data-zone="dump" data-empty="Head empty. Nice."></div>
         <h2 class="h gap">Projects</h2>
         <p class="hint" id="projhint">Click a color to change it everywhere.</p>

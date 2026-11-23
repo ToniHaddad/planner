@@ -270,7 +270,7 @@ function details(t) {
       <button class="check ${s.done ? 'on' : ''}" data-act="sub-done" data-id="${t.id}" data-i="${i}" title="Done">✓</button>
       <span data-sub="${t.id}" data-i="${i}" title="Drag to reorder, double-click to rename">${esc(s.title)}</span>
       <button class="x" title="Delete subtask" data-act="sub-del" data-id="${t.id}" data-i="${i}">×</button></li>`).join('')}</ul>
-    <input class="subadd" type="text" name="subtask" data-subadd="${t.id}" placeholder="Add a subtask and press Enter…" aria-label="New subtask" autocomplete="off" maxlength="300">
+    <div class="subaddrow"><input class="subadd" type="text" name="subtask" data-subadd="${t.id}" placeholder="Add a subtask…" aria-label="New subtask" autocomplete="off" enterkeyhint="done" maxlength="300"><button class="btn small" data-act="sub-add" data-id="${t.id}" title="Add the subtask">Add</button></div>
     <textarea class="notes" name="notes" data-notes="${t.id}" placeholder="Notes…" aria-label="Notes" rows="2" maxlength="5000">${esc(t.notes)}</textarea>
   </div>`;
 }
@@ -430,6 +430,7 @@ const actions = {
     const i = +btn.dataset.i;
     update(t, { subs: t.subs.map((s, k) => k === i ? { title: s.title, done: !s.done } : s) });
   },
+  'sub-add'(t, btn) { addSub(t, btn.previousElementSibling); },
   'sub-del'(t, btn) { update(t, { subs: t.subs.filter((s, k) => k !== +btn.dataset.i) }); },
   theme(_, btn) {
     const next = document.documentElement.dataset.theme === 'light' ? 'dark' : 'light';
@@ -522,14 +523,17 @@ document.addEventListener('click', e => {
 });
 
 // subtasks and notes
+function addSub(t, box) {
+  const v = box.value.trim();
+  if (!t || !v) { box.focus(); return; }
+  if (t.subs.length >= 50) { toast('A task holds up to 50 subtasks.'); return; }
+  box.value = '';
+  box.focus();                                    // the re-draw keeps the focus, so several can be typed in a row
+  update(t, { subs: t.subs.concat({ title: v, done: false }) });
+}
 document.addEventListener('keydown', e => {
   const id = e.target.dataset && e.target.dataset.subadd;
-  if (!id || e.key !== 'Enter') return;
-  const t = task(+id), v = e.target.value.trim();
-  if (!t || !v) return;
-  if (t.subs.length >= 50) { toast('A task holds up to 50 subtasks.'); return; }
-  e.target.value = '';
-  update(t, { subs: t.subs.concat({ title: v, done: false }) });
+  if (id && e.key === 'Enter') addSub(task(+id), e.target);
 });
 document.addEventListener('input', e => {
   const id = e.target.dataset && e.target.dataset.notes;
@@ -545,6 +549,7 @@ addEventListener('pagehide', () => { Object.keys(noteTimers).forEach(id => { con
 document.addEventListener('submit', e => {
   e.preventDefault();
   if (e.target.id === 'pw-form') actions['change-pw']();
+  if (e.target.id === 'add-form') addFromBox();
 });
 
 // rename on double-click: a task's title, or one of its subtasks
@@ -575,13 +580,14 @@ document.addEventListener('dblclick', e => {
   inp.addEventListener('blur', () => finish(true));
 });
 
-$('new').addEventListener('keydown', e => {
-  if (e.key !== 'Enter') return;
-  const v = e.target.value.trim();
-  if (!v) return;
-  e.target.value = '';
+/** Adds what is typed in the brain dump box (Enter, or the Add button: some phone keyboards have no Enter). */
+function addFromBox() {
+  const box = $('new'), v = box.value.trim();
+  if (!v) { box.focus(); return; }
+  box.value = '';
   addTask(v, $('newp').value ? +$('newp').value : null);
-});
+  box.focus();
+}
 
 // project color and name
 document.addEventListener('input', e => {

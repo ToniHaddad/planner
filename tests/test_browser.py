@@ -514,6 +514,21 @@ def run_touch(browser, problems):
     check("phone: the press-and-hold hint is shown", page.locator(".touch-only").is_visible())
     add(page, "Thumb task")
     add(page, "Swipe task")
+    # some phone keyboards have no Enter key: the Add buttons do the same
+    page.fill("#new", "Button task")
+    page.tap("#add-form button[type=submit]")
+    page.wait_for_selector("#z-dump .item:has-text('Button task')")
+    check("phone: the Add button puts a task in the brain dump and empties the box",
+          page.locator("#z-dump .item:has-text('Button task')").count() == 1 and page.input_value("#new") == "")
+    host = "#z-dump .task:has(.item:has-text('Button task'))"
+    page.tap(host + " [data-act=more]")
+    page.fill(host + " .subadd", "Tapped in")
+    page.tap(host + " [data-act=sub-add]")
+    page.wait_for_selector(host + " .subs li:has-text('Tapped in')")
+    check("phone: the Add button beside the subtask box adds a subtask",
+          page.locator(host + " .subs li").count() == 1 and page.input_value(host + " .subadd") == "")
+    page.tap(host + " .item [data-act=del]")
+    page.wait_for_timeout(300)
     finger = Finger(page)
     item = "#z-dump .item:has-text('Thumb task')"
 
